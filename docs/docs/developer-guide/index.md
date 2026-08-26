@@ -35,4 +35,4 @@ The AVD pipeline is the technically distinguishing piece of this solution and ha
 
 ## Looking for the operator guides?
 
-If you want to *use* the system to provision fabrics and view configurations without modifying code, start with [Quick Start](/quick-start) and the [how-to guides](/how-to/add-network-segment).
+If you want to *use* the system to provision fabrics and view configurations without modifying code, start with [Quick Start](../quick-start.md) and the [how-to guides](../how-to/add-network-segment.md).

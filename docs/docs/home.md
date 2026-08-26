@@ -68,9 +68,9 @@ flowchart LR
 
 ## Who it's for
 
-- **Network automation teams running AVD with static variable files** — add a source of truth, API and UI layer, and branch-based change control on top of an existing AVD workflow. → [Provision Your First Fabric](/provision-first-fabric)
-- **Teams evaluating how to operate AVD at scale** — the pipeline derives per-device host_vars from the source of truth; no separate inventory files are required. → [Quick Start](/quick-start)
-- **Contributors extending the pipeline** — add new device roles, schema fields, or transform outputs; the developer guide covers the full chain, role mapping, and concrete examples. → [Developer Guide](/developer-guide/)
+- **Network automation teams running AVD with static variable files** — add a source of truth, API and UI layer, and branch-based change control on top of an existing AVD workflow. → [Provision Your First Fabric](./provision-first-fabric.md)
+- **Teams evaluating how to operate AVD at scale** — the pipeline derives per-device host_vars from the source of truth; no separate inventory files are required. → [Quick Start](./quick-start.md)
+- **Contributors extending the pipeline** — add new device roles, schema fields, or transform outputs; the developer guide covers the full chain, role mapping, and concrete examples. → [Developer Guide](./developer-guide/index.md)
 
 ## What's included
 
@@ -104,7 +104,7 @@ flowchart LR
 - **Run `invoke load` in order.** The load sequence is ordered: schemas, then menu, then seed data, then repository registration, then triggers. Running steps out of order or skipping `uv sync` first is the most common cause of load failures.
 - **Re-run generators idempotently.** All generators use checksum-based change detection — re-running after a partial failure is safe and applies only what changed.
 - **Use the service portal for repeatable day-two operations.** The portal wraps generator calls and branch creation into guided workflows with validation. For one-off changes, the Infrahub UI and GraphQL API work directly; use the portal for provisioning workflows run by team members without API or CLI access.
-- **Scope to supported capabilities.** This reference design covers a defined set of AVD capabilities — uncommon or highly custom options may not be modeled. Review the [Supported Capabilities](/supported-capabilities) page before planning a deployment.
+- **Scope to supported capabilities.** This reference design covers a defined set of AVD capabilities — uncommon or highly custom options may not be modeled. Review the [Supported Capabilities](./supported-capabilities.md) page before planning a deployment.
 
 ## Get started
 
@@ -114,15 +114,15 @@ flowchart LR
 2. Build the custom Infrahub image: `uv run invoke build` (one-time).
 3. Start the stack: `uv run invoke start`.
 4. Load schemas, seed data, and the repository: `uv run invoke load`.
-5. Follow [Provision Your First Fabric](/provision-first-fabric) to generate a fabric and reach rendered EOS artifacts.
+5. Follow [Provision Your First Fabric](./provision-first-fabric.md) to generate a fabric and reach rendered EOS artifacts.
 
 ## Additional resources
 
 | Goal | Guide |
 |------|-------|
-| Get the stack running | [Quick Start](/quick-start) — prerequisites, install steps, and first load |
-| Generate your first fabric | [Provision Your First Fabric](/provision-first-fabric) — end-to-end walkthrough |
-| Check what's supported | [Supported Capabilities](/supported-capabilities) — capability matrix |
-| Understand how it's built | [Architecture Overview](/developer-guide/architecture) — system components and generator pipeline |
-| Extend the pipeline | [Extending the Pipeline](/developer-guide/avd/extending) — new roles, transforms, schema fields |
-| Find solutions to common issues | [Troubleshooting](/troubleshooting) |
+| Get the stack running | [Quick Start](./quick-start.md) — prerequisites, install steps, and first load |
+| Generate your first fabric | [Provision Your First Fabric](./provision-first-fabric.md) — end-to-end walkthrough |
+| Check what's supported | [Supported Capabilities](./supported-capabilities.md) — capability matrix |
+| Understand how it's built | [Architecture Overview](./developer-guide/architecture.md) — system components and generator pipeline |
+| Extend the pipeline | [Extending the Pipeline](./developer-guide/avd/extending.md) — new roles, transforms, schema fields |
+| Find solutions to common issues | [Troubleshooting](./troubleshooting.md) |

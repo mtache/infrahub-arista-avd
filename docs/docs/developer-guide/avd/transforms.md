@@ -8,7 +8,7 @@ sidebar_position: 3
 # AVD transforms
 
 :::info Developer Guide
-Documents the transform implementations. To *view* artifacts as an operator, see [Viewing Artifacts](/viewing-artifacts).
+Documents the transform implementations. To *view* artifacts as an operator, see [Viewing Artifacts](../../viewing-artifacts.md).
 :::
 
 Four Python transforms turn the data produced by the [two-phase pipeline](./overview.md) into user-facing artifacts. All four are registered in [`.infrahub.yml`](https://github.com/opsmill/infrahub-arista-avd/blob/main/.infrahub.yml).

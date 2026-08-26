@@ -8,7 +8,7 @@ sidebar_position: 1
 # Architecture overview
 
 :::info Developer Guide
-Assumes familiarity with Infrahub and Python. If you only want to *use* the system, start with [Quick Start](/quick-start).
+Assumes familiarity with Infrahub and Python. If you only want to *use* the system, start with [Quick Start](../quick-start.md).
 :::
 
 The solution is a repository of schemas, generators, and transforms loaded on top of the Infrahub platform. The sections below cover its components, data model, and the generator and transform pipelines.

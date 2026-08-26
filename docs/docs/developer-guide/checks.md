@@ -8,7 +8,7 @@ sidebar_position: 5
 # Checks
 
 :::info Developer Guide
-Documents the check implementations. For the operator view of CloudVision validation — credentials, workspace tracking, and submission — see [CloudVision Validation](/cloudvision).
+Documents the check implementations. For the operator view of CloudVision validation — credentials, workspace tracking, and submission — see [CloudVision Validation](../cloudvision.md).
 :::
 
 ## Overview
@@ -72,7 +72,7 @@ The flow, in order:
 Download, JSON-decode, render, connection, deployment, and build failures are all reported as
 errors and block the proposed change. The behavioural detail — eligibility rules, workspace naming
 and reuse, thread comments, and what happens when the tracking schema is absent — is documented on
-the [CloudVision Validation](/cloudvision) page rather than duplicated here.
+the [CloudVision Validation](../cloudvision.md) page rather than duplicated here.
 
 ### Optional relationships and the generated query model
 
@@ -196,4 +196,4 @@ stubbed rather than against a live CloudVision instance.
 
 - Checks: [`checks/`](https://github.com/opsmill/infrahub-arista-avd/tree/main/checks)
 - Registration: [`.infrahub.yml`](https://github.com/opsmill/infrahub-arista-avd/blob/main/.infrahub.yml) — `check_definitions:` block.
-- Operator documentation: [CloudVision Validation](/cloudvision).
+- Operator documentation: [CloudVision Validation](../cloudvision.md).
