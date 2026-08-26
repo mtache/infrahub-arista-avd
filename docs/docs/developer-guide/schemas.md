@@ -237,7 +237,7 @@ Tracks one CloudVision workspace created by the `cv-config-validation` check for
 - **Attributes**: `name` (display name), `workspace_id` (unique — the CloudVision workspace UUID), `proposed_change_id`, `workspace_url`, `thread_id` (the `CoreChangeThread` used for lifecycle comments), `change_control_id` and `change_control_url` (set when a change control exists), `last_submission_error`, `last_submission_attempt_at`, `submitted_at`, and `status`.
 - **Relationships**: `fabric` → `NetworkFabric` (cardinality one).
 
-The workspace ID is derived deterministically from the proposed-change ID and the fabric name, so re-running validation updates the same workspace rather than creating another. See [Checks](./checks.md) and [CloudVision Validation](/cloudvision).
+The workspace ID is derived deterministically from the proposed-change ID and the fabric name, so re-running validation updates the same workspace rather than creating another. See [Checks](./checks.md) and [CloudVision Validation](../cloudvision.md).
 
 Fabrics opt in through `NetworkFabric.cloudvision_managed` (Boolean, default `false`) in `logical_design.yml`; the check skips everything else when it is false.
 

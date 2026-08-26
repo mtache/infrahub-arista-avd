@@ -8,7 +8,7 @@ sidebar_position: 1
 # AVD pipeline overview
 
 :::info Developer Guide
-If you want to *use* the system to produce configs, start with [Quick Start](/quick-start).
+If you want to *use* the system to produce configs, start with [Quick Start](../../quick-start.md).
 :::
 
 The Arista Validated Design (AVD) pipeline transforms Infrahub's network data model into PyAVD-compatible input data, then renders Arista EOS configurations and human-readable documentation from it.

@@ -11,7 +11,7 @@ toc_max_heading_level: 2
 
 # Common issues
 
-The failure modes below are the ones you'll hit most often. If your problem isn't here, the [developer guide](/developer-guide/) has deeper debugging material for contributors.
+The failure modes below are the ones you'll hit most often. If your problem isn't here, the [developer guide](./developer-guide/index.md) has deeper debugging material for contributors.
 
 ## Stack is not healthy
 

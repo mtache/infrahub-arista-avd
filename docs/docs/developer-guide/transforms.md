@@ -8,7 +8,7 @@ sidebar_position: 4
 # Transforms
 
 :::info Developer Guide
-Documents the transform implementations. To *view* artifacts as an operator, see [Viewing Artifacts](/viewing-artifacts).
+Documents the transform implementations. To *view* artifacts as an operator, see [Viewing Artifacts](../viewing-artifacts.md).
 :::
 
 ## Overview
@@ -172,7 +172,7 @@ interface-mapping bind come from schema attributes (`DcimPlatform.containerlab_o
 cEOS version is a data change rather than a code change.
 
 Nodes and links are emitted in a stable sorted order, so two renders of unchanged data are
-byte-identical. See the [ContainerLab page](/containerlab) for the full artifact shape, the
+byte-identical. See the [ContainerLab page](../containerlab.md) for the full artifact shape, the
 role-selection rules, and how to deploy the topology.
 
 ### CVWorkspaceSubmissionWebhookPayload

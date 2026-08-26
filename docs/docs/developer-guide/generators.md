@@ -8,7 +8,7 @@ sidebar_position: 3
 # Generators
 
 :::info Developer Guide
-Explains how the generators are structured. To *run* generators as an operator, start with [Quick Start](/quick-start).
+Explains how the generators are structured. To *run* generators as an operator, start with [Quick Start](../quick-start.md).
 :::
 
 ## Overview
@@ -245,7 +245,7 @@ For EVPN Multi-Domain Gateway hostvars, the query fetches `EvpnGatewayGroup.loca
 Because steps 3–5 run on every invocation, the generator is the reconciliation path as well as the
 creation path: re-running it after a VLAN or LAG change updates an already-cabled server without
 producing duplicate links. The operator-facing walkthrough is
-[Add a Server](/how-to/add-server).
+[Add a Server](../how-to/add-server.md).
 
 ### BackfillStructuredConfigGenerator
 
@@ -264,7 +264,7 @@ prefix lists, route maps, and static routes.
 This generator runs in the opposite direction to the rest of the chain: everything else turns intent
 into AVD inputs, while the backfill turns AVD's derived output into queryable objects. Those objects
 are reconciled *from* AVD, not authored as inputs — see
-[Supported Capabilities](/supported-capabilities).
+[Supported Capabilities](../supported-capabilities.md).
 
 ## Generator execution order
 

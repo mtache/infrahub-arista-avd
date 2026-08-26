@@ -87,7 +87,7 @@ const config: Config = {
       items: [
         {
           type: 'docSidebar',
-          sidebarId: 'mainSidebar',
+          sidebarId: 'aristaAvdSidebar',
           position: 'left',
           label: 'Documentation',
         },

@@ -8,7 +8,7 @@ sidebar_position: 7
 # Debugging the pipeline
 
 :::info Developer Guide
-For operator-facing issues (stack health, generator order, "no structured config available"), see the [Troubleshooting page](/troubleshooting).
+For operator-facing issues (stack health, generator order, "no structured config available"), see the [Troubleshooting page](../../troubleshooting.md).
 :::
 
 ## Inspecting hostvars and structured configs
@@ -191,4 +191,4 @@ The reference configs come from the AVD repository, under
 
 - [Overview](./overview.md) — the pipeline shape at a glance.
 - [AvdArtifact & File Storage](./artifacts.md) — exactly which node holds which piece of data.
-- [Troubleshooting](/troubleshooting) — operator-level issues and fixes.
+- [Troubleshooting](../../troubleshooting.md) — operator-level issues and fixes.

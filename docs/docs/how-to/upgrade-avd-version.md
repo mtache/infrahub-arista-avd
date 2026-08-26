@@ -31,7 +31,7 @@ The branch-first upgrade flow is a maintainer/operator task — you rebuild the 
    ```
 
 3. **Regenerate on the branch.**
-   Re-run the AVD generators so host_vars and structured configuration are rebuilt with the new PyAVD version. Regeneration is idempotent (checksum-based), so it only reprocesses what the new version changes — see [Regenerate a Fabric](/how-to/regenerate-fabric).
+   Re-run the AVD generators so host_vars and structured configuration are rebuilt with the new PyAVD version. Regeneration is idempotent (checksum-based), so it only reprocesses what the new version changes — see [Regenerate a Fabric](./regenerate-fabric.md).
 
 4. **Review the rendered-config diff.**
    Open a proposed change from your branch and inspect the diff of the rendered EOS configurations and structured config. This is where a PyAVD version bump shows its effect — look for unexpected changes to interfaces, BGP, or EVPN stanzas.
@@ -46,4 +46,4 @@ The branch-first upgrade flow is a maintainer/operator task — you rebuild the 
 
 - A large or surprising diff points to a PyAVD default or schema change between versions — cross-check the release notes.
 - Roll back by discarding the branch (nothing merged, nothing deployed) and pinning the previous PyAVD version.
-- For pipeline-level failures, see [Debugging the Pipeline](/developer-guide/avd/debugging).
+- For pipeline-level failures, see [Debugging the Pipeline](../developer-guide/avd/debugging.md).

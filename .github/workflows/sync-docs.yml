@@ -1,0 +1,61 @@
+---
+name: Sync docs to infrahub-docs
+
+# Pushes this repository's documentation into the opsmill/infrahub-docs
+# aggregation site, which publishes it at docs.infrahub.app/arista-avd.
+#
+# Content in infrahub-docs is overwritten on every run, so all edits must be
+# made here. Requires a PAT_TOKEN secret with write access to
+# opsmill/infrahub-docs.
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'docs/docs/**'
+      - 'docs/sidebars.ts'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    name: Sync documentation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout source repository
+        uses: actions/checkout@v7
+        with:
+          path: source-repo
+
+      - name: Checkout target repository
+        uses: actions/checkout@v7
+        with:
+          repository: opsmill/infrahub-docs
+          token: ${{ secrets.PAT_TOKEN }}
+          path: target-repo
+
+      # The section directory is removed rather than overwritten so that a file
+      # deleted here is also deleted on the aggregation site.
+      - name: Sync documentation into the aggregation site
+        run: |
+          rm -rf target-repo/docs/docs-arista-avd
+          mkdir -p target-repo/docs/docs-arista-avd
+          cp -r source-repo/docs/docs/. target-repo/docs/docs-arista-avd/
+          cp source-repo/docs/sidebars.ts target-repo/docs/sidebars-arista-avd.ts
+
+      - name: Commit and push
+        working-directory: target-repo
+        run: |
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add .
+          if git diff --staged --quiet; then
+            echo "No documentation changes to sync."
+          else
+            git commit -m "Sync docs from infrahub-arista-avd repo"
+            git push
+          fi

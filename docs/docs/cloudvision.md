@@ -165,7 +165,7 @@ CloudVision change-control management and Semaphore Ansible playbooks are out of
 
 ## Related
 
-- [Checks](/developer-guide/checks) — how the check is wired, its query and supporting modules, and
+- [Checks](./developer-guide/checks.md) — how the check is wired, its query and supporting modules, and
   how to run or extend it.
-- [Schemas → CloudvisionWorkspace](/developer-guide/schemas#cloudvisionworkspace--cloudvisionworkspace)
+- [Schemas → CloudvisionWorkspace](./developer-guide/schemas.md#cloudvisionworkspace--cloudvisionworkspace)
   — the tracking node's attributes and relationships.
