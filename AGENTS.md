@@ -226,3 +226,19 @@ pnpm run build
 
 pnpm settings for the site live in `docs/pnpm-workspace.yaml`, not in `docs/package.json` -
 pnpm no longer reads the `pnpm` field there, so overrides placed in it are ignored.
+
+## Documentation publishing
+
+`docs/docs/` is synced to `opsmill/infrahub-docs` by `.github/workflows/sync-docs.yml` on
+every push to `main`, and published at `docs.infrahub.app/arista-avd`. That site mounts this
+content under a `/arista-avd` route rather than at the site root, so two rules apply to
+anything added under `docs/docs/`:
+
+- Link between pages with relative Markdown paths (`](./quick-start.md)`,
+  `](../troubleshooting.md)`), never root-absolute ones (`](/quick-start)`). Absolute paths
+  resolve locally because `routeBasePath` is `/` here, but on the aggregation site they point
+  at core Infrahub pages and fail its build, which sets `onBrokenLinks: 'throw'`.
+- Keep the sidebar key in `docs/sidebars.ts` named `aristaAvdSidebar`. The aggregation site's
+  navbar references it by name, and sidebar keys must be unique across that site.
+
+Edits made directly in `infrahub-docs` are overwritten by the next sync.
