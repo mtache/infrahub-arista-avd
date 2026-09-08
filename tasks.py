@@ -382,6 +382,20 @@ def init_semaphore(
         },
     )
 
+    print("ANTA inventory...")
+    anta_inv_id = api.find_or_create(
+        f"/api/project/{project_id}/inventory",
+        f"/api/project/{project_id}/inventory",
+        "ANTA Controller",
+        {
+            "name": "ANTA Controller",
+            "project_id": project_id,
+            "inventory": "inventory_anta.yml",
+            "type": "file",
+            "ssh_key_id": key_id,
+        },
+    )
+
     print("ANTA environment...")
     anta_container_workspace = f"{SEMAPHORE_PLAYBOOK_PATH.rsplit('/', 1)[0]}/clab-staging/anta"
     anta_env_id = api.find_or_create(
@@ -401,7 +415,7 @@ def init_semaphore(
             "name": "Validate with ANTA",
             "project_id": project_id,
             "repository_id": repo_id,
-            "inventory_id": inv_id,
+            "inventory_id": anta_inv_id,
             "environment_id": anta_env_id,
             "playbook": "test.yml",
             "type": "task",

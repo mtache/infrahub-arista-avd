@@ -1,0 +1,8 @@
+---
+# ANTA discovers devices from Infrahub on the requested branch and adds them to
+# an in-memory group. Keep an explicit localhost so the discovery play also runs
+# when the branch contains no devices.
+all:
+  hosts:
+    localhost:
+      ansible_connection: local

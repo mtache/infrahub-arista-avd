@@ -1,7 +1,6 @@
 ---
 plugin: opsmill.infrahub.inventory
 api_endpoint: "http://infrahub-server:8000"
-branch: "{{ lookup('env', 'INFRAHUB_BRANCH') | default('main', true) }}"
 
 timeout: 30
 strict: false
