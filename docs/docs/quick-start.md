@@ -45,6 +45,12 @@ portal, task worker, and Semaphore for API authentication.
 
 Re-run `uv run invoke init-secrets` after deleting a value to generate only that missing assignment.
 
+ANTA device credentials are not generated because they must match the target EOS configuration. To run
+the **Validate with ANTA** Semaphore task, add `ANTA_PASSWORD=<device-password>` to the ignored `.env`
+file or export it in the shell before `invoke start`. The seeded task uses the non-secret `admin` username;
+change `anta_user` in its Semaphore environment when the devices use another account. Re-run
+`uv run invoke start` after changing `ANTA_PASSWORD` so Compose recreates Semaphore with the new value.
+
 ## 3. Build the custom Infrahub image
 
 The project extends the base Infrahub image with `pyavd` and project code. Build the image once:

@@ -180,6 +180,64 @@ class _SemaphoreClient:
         print(f"  '{name}' created (id={rid}).")
         return rid
 
+    def remove_environment_extra_vars(
+        self,
+        project_id: int,
+        environment_id: int,
+        names: set[str],
+    ) -> tuple[str, ...]:
+        """Remove obsolete extra variables from an existing environment."""
+        url = f"/api/project/{project_id}/environment/{environment_id}"
+        resp = self._client.get(url)
+        resp.raise_for_status()
+        environment: dict[str, object] = resp.json()
+
+        raw_extra_vars = environment.get("json") or "{}"
+        if not isinstance(raw_extra_vars, str):
+            raise TypeError("Semaphore environment extra variables must be a JSON string.")
+        extra_vars: dict[str, object] = json.loads(raw_extra_vars)
+        removed = tuple(sorted(name for name in names if name in extra_vars))
+        if not removed:
+            return ()
+
+        for name in removed:
+            extra_vars.pop(name)
+
+        payload = {
+            "id": environment["id"],
+            "name": environment["name"],
+            "project_id": environment["project_id"],
+            "json": json.dumps(extra_vars),
+            "env": environment.get("env") or "{}",
+        }
+        for optional_name in ("password", "secret_storage_id", "secret_storage_key_prefix"):
+            if optional_name in environment:
+                payload[optional_name] = environment[optional_name]
+        update = self._client.put(url, json=payload)
+        update.raise_for_status()
+        print(f"  Removed obsolete extra variable(s): {', '.join(removed)}.")
+        return removed
+
+
+def _anta_environment_payload(project_id: int, workspace: str) -> dict[str, object]:
+    """Build a password-free Semaphore environment for ANTA execution."""
+    return {
+        "name": "ANTA",
+        "project_id": project_id,
+        "json": json.dumps(
+            {
+                "fabric_name": "Fabric-L3LS-Multi-Domain",
+                "anta_user": "admin",
+            }
+        ),
+        "env": json.dumps(
+            {
+                "INFRAHUB_BRANCH": "main",
+                "ANTA_WORKSPACE": workspace,
+            }
+        ),
+    }
+
 
 def ensure_clab_staging_dir() -> Path:
     """Create the ContainerLab staging directory the Semaphore container writes to.
@@ -319,6 +377,33 @@ def init_semaphore(
             "inventory_id": inv_id,
             "environment_id": env_id,
             "playbook": "deploy.yml",
+            "type": "task",
+            "app": "ansible",
+        },
+    )
+
+    print("ANTA environment...")
+    anta_container_workspace = f"{SEMAPHORE_PLAYBOOK_PATH.rsplit('/', 1)[0]}/clab-staging/anta"
+    anta_env_id = api.find_or_create(
+        f"/api/project/{project_id}/environment",
+        f"/api/project/{project_id}/environment",
+        "ANTA",
+        _anta_environment_payload(project_id, anta_container_workspace),
+    )
+    api.remove_environment_extra_vars(project_id, anta_env_id, {"anta_password"})
+
+    print("ANTA task template...")
+    api.find_or_create(
+        f"/api/project/{project_id}/templates",
+        f"/api/project/{project_id}/templates",
+        "Validate with ANTA",
+        {
+            "name": "Validate with ANTA",
+            "project_id": project_id,
+            "repository_id": repo_id,
+            "inventory_id": inv_id,
+            "environment_id": anta_env_id,
+            "playbook": "test.yml",
             "type": "task",
             "app": "ansible",
         },

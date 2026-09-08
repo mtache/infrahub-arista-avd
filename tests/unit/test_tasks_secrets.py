@@ -150,10 +150,11 @@ def test_inventory_uses_environment_token_and_example_has_no_secret_values() -> 
         if separator
     }
     assert set(example_assignments) == SECRET_NAMES | {
+        "ANTA_PASSWORD",
         "CLOUDVISION_SERVERS",
         "CLOUDVISION_TOKEN",
         "CLOUDVISION_VERIFY_CERTS",
     }
-    assert not any(example_assignments[name] for name in SECRET_NAMES | {"CLOUDVISION_TOKEN"})
+    assert not any(example_assignments[name] for name in SECRET_NAMES | {"ANTA_PASSWORD", "CLOUDVISION_TOKEN"})
     assert example_assignments["CLOUDVISION_SERVERS"] == "www.cv-prod-euwest-2.arista.io"
     assert example_assignments["CLOUDVISION_VERIFY_CERTS"] == "true"

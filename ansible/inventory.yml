@@ -1,6 +1,7 @@
 ---
 plugin: opsmill.infrahub.inventory
 api_endpoint: "http://infrahub-server:8000"
+branch: "{{ lookup('env', 'INFRAHUB_BRANCH') | default('main', true) }}"
 
 timeout: 30
 strict: false
@@ -10,6 +11,7 @@ nodes:
     include:
       - name
       - location.name
+      - pod.parent.name
       - role
       - device_type.name
       # - device_type.platform.ansible_network_os
@@ -22,3 +24,4 @@ compose:
   device_type: device_type.name
   # platform: device_type.platform.ansible_network_os
   location: location.name
+  fabric: pod.parent.name

@@ -73,9 +73,10 @@ services:
       SEMAPHORE_ADMIN_PASSWORD: ${SEMAPHORE_ADMIN_PASSWORD:?Run uv run invoke init-secrets}
       SEMAPHORE_ADMIN_NAME: Admin
       SEMAPHORE_ADMIN_EMAIL: admin@localhost
-      SEMAPHORE_FORWARDED_ENV_VARS: '["INFRAHUB_ADDRESS","INFRAHUB_API_TOKEN"]'
+      SEMAPHORE_FORWARDED_ENV_VARS: '["INFRAHUB_ADDRESS","INFRAHUB_API_TOKEN","ANTA_PASSWORD"]'
       INFRAHUB_ADDRESS: http://infrahub-server:8000
       INFRAHUB_API_TOKEN: ${INFRAHUB_API_TOKEN:?Run uv run invoke init-secrets}
+      ANTA_PASSWORD: ${ANTA_PASSWORD:-}
     ports:
       - "3000:3000"
     volumes:
