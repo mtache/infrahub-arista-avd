@@ -14,12 +14,12 @@ nodes:
       - role
       - device_type.name
       # - device_type.platform.ansible_network_os
-      - primary_address.address
+      - mgmt_ip.address
       - status
 
 compose:
   hostname: name
-  ansible_host: primary_address.address | ansible.utils.ipaddr('address')
+  ansible_host: mgmt_ip.address | ansible.utils.ipaddr('address')
   device_type: device_type.name
   # platform: device_type.platform.ansible_network_os
   location: location.name

@@ -27,12 +27,12 @@
                 devices { edges { node { ... on DcimDevice {
                   id
                   name { value }
-                  primary_address { node { ... on IpamIPAddress { address { value } } } }
+                  mgmt_ip { node { ... on IpamIPAddress { address { value } } } }
                 } } } }
                 racks { edges { node { devices { edges { node { ... on DcimDevice {
                   id
                   name { value }
-                  primary_address { node { ... on IpamIPAddress { address { value } } } }
+                  mgmt_ip { node { ... on IpamIPAddress { address { value } } } }
                 } } } } } } }
               } } } }
             } } }
@@ -65,13 +65,13 @@
           - infrahub_anta_devices | length > 0
         fail_msg: "No devices were found in fabric {{ fabric_name }} on branch {{ infrahub_branch }}."
 
-    - name: Require a primary address on every ANTA device
+    - name: Require a management address on every ANTA device
       ansible.builtin.assert:
         that:
-          - item.primary_address is not none
-          - item.primary_address.node is not none
-          - item.primary_address.node.address.value | length > 0
-        fail_msg: "Device {{ item.name.value }} has no primary address on branch {{ infrahub_branch }}."
+          - item.mgmt_ip is not none
+          - item.mgmt_ip.node is not none
+          - item.mgmt_ip.node.address.value | length > 0
+        fail_msg: "Device {{ item.name.value }} has no management address on branch {{ infrahub_branch }}."
       loop: "{{ infrahub_anta_devices }}"
       loop_control:
         label: "{{ item.name.value }}"
@@ -81,7 +81,7 @@
         name: "{{ item.name.value }}"
         groups: infrahub_anta_targets
         id: "{{ item.id }}"
-        ansible_host: "{{ item.primary_address.node.address.value | regex_replace('/.*$', '') }}"
+        ansible_host: "{{ item.mgmt_ip.node.address.value | regex_replace('/.*$', '') }}"
         anta_tags:
           - "{{ item.name.value }}"
       loop: "{{ infrahub_anta_devices }}"
