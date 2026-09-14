@@ -60,9 +60,10 @@ jobs:
           #
           # This repository has no .github/dependabot.yml yet, so the exemption
           # is dormant — kept so that enabling dependabot needs no change here.
-          # update-infrahub.yml and update-infrahub-sdk.yml do open pull
-          # requests automatically, but through a PAT and without applying any
-          # label, so those need ci/skip-changelog set by hand until they do.
+          # Only this one bot is exempt by author — humans still need a
+          # fragment, and update-infrahub.yml / update-infrahub-sdk.yml label
+          # their own pull requests at creation instead. They open theirs
+          # through a PAT, so no author exemption would ever match them.
           if [ "${AUTHOR}" = "dependabot[bot]" ]; then
             echo "Opened by ${AUTHOR} — dependency update, no fragment required."
             exit 0
