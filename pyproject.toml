@@ -21,6 +21,7 @@ dev = [
     "pytest-asyncio>=1.0.0",
     "ruff>=0.12.0",
     "rumdl>=0.2.54",
+    "towncrier>=24.8,<27",
     "yamllint>=1.37.1",
 ]
 catalog = [
@@ -181,6 +182,54 @@ override-dependencies = [
     "ariadne-codegen>=0.17.1",
     "click>=8.3",
 ]
+
+[tool.towncrier]
+# `solution_arista_avd` does not expose `__version__`, so `package` is
+# intentionally omitted; pass `--version X.Y.Z` to `towncrier build` at release
+# time.
+directory = "changelog"
+filename = "CHANGELOG.md"
+start_string = "<!-- towncrier release notes start -->\n"
+underlines = ["", "", ""]
+title_format = "## [Infrahub Arista AVD - v{version}](https://github.com/opsmill/infrahub-arista-avd/tree/{version}) - {project_date}"
+issue_format = "[#{issue}](https://github.com/opsmill/infrahub-arista-avd/issues/{issue})"
+orphan_prefix = "+"
+template = "changelog/towncrier.md.template"
+
+[[tool.towncrier.type]]
+directory = "security"
+name = "Security"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "removed"
+name = "Removed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "deprecated"
+name = "Deprecated"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "added"
+name = "Added"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "changed"
+name = "Changed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "fixed"
+name = "Fixed"
+showcontent = true
+
+[[tool.towncrier.type]]
+directory = "housekeeping"
+name = "Housekeeping"
+showcontent = true
 
 [build-system]
 requires = ["hatchling"]
