@@ -72,7 +72,7 @@ jobs:
       #   3. the CI build arg, image tag, and INFRAHUB_TESTING_IMAGE_VER
       #   4. the documented `export INFRAHUB_BASE_VERSION` lines
       # The image tags here are shell-expansion defaults, not literals, e.g.
-      #   image: "${INFRAHUB_DOCKER_IMAGE:-.../infrahub}:${VERSION:-1.10.6}"
+      #   image: "${INFRAHUB_DOCKER_IMAGE:-.../infrahub}:${VERSION:-X.Y.Z}"
       # so the tag must only be rewritten when it starts with a digit. A broader
       # `[^"}[:space:]]+` tag pattern swallows the `${VERSION:-` prefix and
       # leaves a stray brace, silently breaking the VERSION override.
