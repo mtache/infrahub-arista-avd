@@ -136,8 +136,13 @@ jobs:
             echo "PR for ${{ env.BRANCH_NAME }} already open, skipping create"
             exit 0
           fi
+          # Labelled at creation: a dependency bump carries no behaviour change
+          # of its own, so it is exempt from the news-fragment gate
+          # (changelog-check.yml). These pull requests are opened through a PAT,
+          # so the gate's dependabot[bot] author exemption does not cover them.
           gh pr create \
             --title "update Infrahub to version ${{ env.INFRAHUB_VERSION }} against ${{ matrix.branch-name }}" \
             --body "This PR updates Infrahub to version ${{ env.INFRAHUB_VERSION }}." \
+            --label "ci/skip-changelog" \
             --base ${{ matrix.branch-name }} \
             --head ${{ env.BRANCH_NAME }}
