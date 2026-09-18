@@ -1,6 +1,29 @@
 <!--
 Sync Impact Report
 ==================
+Version change: 1.2.0 -> 1.2.1 (patch: align the active InfraHub runtime and
+  integration-test dependency target with InfraHub 1.10.10)
+
+Modified principles: None
+
+Added sections: None
+
+Removed sections: None
+
+Supporting sections updated:
+  - Technology Stack & Constraints: Infrahub image target moves from 1.10.6 to
+    1.10.10 and infrahub-testcontainers is pinned to the matching release.
+
+Templates and command files requiring updates:
+  - .specify/templates/plan-template.md: ✅ reviewed; no update required.
+  - .specify/templates/spec-template.md: ✅ reviewed; no update required.
+  - .specify/templates/tasks-template.md: ✅ reviewed; no update required.
+
+Follow-up TODOs: None
+
+Previous report (1.1.1 -> 1.2.0: the mandatory linter set gains Markdown and
+prose linting)
+
 Version change: 1.1.1 -> 1.2.0 (minor: the mandatory linter set gains Markdown
   and prose linting, which is materially expanded quality-gate guidance)
 
@@ -193,12 +216,12 @@ breaks discovery and makes cross-references expensive to maintain.
 - **Language**: Python >=3.11, <3.14.
 - **Platform**: Infrahub with Neo4j, PostgreSQL, Redis, and RabbitMQ.
 - **Infrahub image**: Build and local-stack workflows target
-  `INFRAHUB_BASE_VERSION=1.10.6` unless a feature explicitly plans an upgrade.
+  `INFRAHUB_BASE_VERSION=1.10.10` unless a feature explicitly plans an upgrade.
 - **Core dependencies**: `pyavd>=6.3.0,<6.4.0`, `httpx>=0.28.1`, and
   `streamlit-flow-component>=1.6.1`.
 - **Development dependencies**: `infrahub-sdk` with the `all` extra at
   version >=1.19.0,
-  `infrahub-testcontainers>=1.3.0`, `invoke>=2.2.0`, `pytest>=8.4.1`,
+  `infrahub-testcontainers==1.10.10`, `invoke>=2.2.0`, `pytest>=8.4.1`,
   `pytest-asyncio>=1.0.0`, `ruff>=0.12.0`, `mypy>=1.17.1`, `rumdl>=0.2.54`,
   and `yamllint>=1.37.1`.
 - **Service portal dependencies**: the `catalog` dependency group owns Streamlit,
@@ -293,4 +316,4 @@ architectural decisions are made.
   uncommitted. When guidance conflicts, the stricter project safety rule wins
   unless an explicit maintainer decision supersedes it.
 
-**Version**: 1.2.0 | **Ratified**: 2026-02-10 | **Last Amended**: 2026-08-11
+**Version**: 1.2.1 | **Ratified**: 2026-02-10 | **Last Amended**: 2026-09-14
