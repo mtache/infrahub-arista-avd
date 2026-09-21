@@ -365,6 +365,14 @@ def test_fabric_pool_check_query_scopes_pods_to_the_target_fabric() -> None:
     assert "NetworkPod(parent__name__value: $name)" in query
 
 
+def test_fabric_pool_check_query_requests_dci_parent_typename() -> None:
+    """Infrahub needs the concrete parent type when resolving DCI endpoint fabrics."""
+    query = (Path(__file__).parents[2] / "checks" / "fabric_pool_check.gql").read_text(encoding="utf-8")
+    dci_query = query.split('NetworkLink(role__value: "dci")', maxsplit=1)[1]
+
+    assert "parent {\n                            node {\n                              __typename\n" in dci_query
+
+
 async def test_fabric_pool_check_accepts_unmigrated_fabric_using_legacy_relationships() -> None:
     """A fabric that has not moved its pools into fabric_ip_pools still generates, so it must still pass."""
     check = _check()
