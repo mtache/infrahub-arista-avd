@@ -12,7 +12,6 @@ import tasks
 
 SECRET_NAMES = {
     "INFRAHUB_INITIAL_ADMIN_PASSWORD",
-    "INFRAHUB_INITIAL_ADMIN_TOKEN",
     "INFRAHUB_API_TOKEN",
     "INFRAHUB_SECURITY_SECRET_KEY",
     "SEMAPHORE_ADMIN_PASSWORD",
@@ -29,10 +28,10 @@ def test_initialize_secrets_generates_strong_values_with_secure_permissions(tmp_
     assert set(values) == SECRET_NAMES
     assert all(
         values[name] is not None and len(values[name] or "") >= 40
-        for name in ("INFRAHUB_INITIAL_ADMIN_PASSWORD", "INFRAHUB_SECURITY_SECRET_KEY", "SEMAPHORE_ADMIN_PASSWORD")
+        for name in ("INFRAHUB_INITIAL_ADMIN_PASSWORD", "SEMAPHORE_ADMIN_PASSWORD")
     )
-    assert UUID(values["INFRAHUB_INITIAL_ADMIN_TOKEN"] or "").version == 4
-    assert values["INFRAHUB_INITIAL_ADMIN_TOKEN"] == values["INFRAHUB_API_TOKEN"]
+    assert UUID(values["INFRAHUB_API_TOKEN"] or "").version == 4
+    assert UUID(values["INFRAHUB_SECURITY_SECRET_KEY"] or "").version == 4
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
 
@@ -63,6 +62,18 @@ def test_load_environment_preserves_exported_values(tmp_path: Path, monkeypatch:
     tasks._load_environment(env_path)
 
     assert os.environ["SEMAPHORE_ADMIN_PASSWORD"] == exported_value
+
+
+def test_initialize_secrets_migrates_legacy_initial_token_to_single_api_token(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    legacy_token = str(UUID("00000000-0000-4000-8000-000000000001"))
+    env_path.write_text(f"INFRAHUB_INITIAL_ADMIN_TOKEN={legacy_token}\n")
+
+    tasks._initialize_secrets(env_path)
+    values = dotenv_values(env_path)
+
+    assert "INFRAHUB_INITIAL_ADMIN_TOKEN" not in values
+    assert values["INFRAHUB_API_TOKEN"] == legacy_token
 
 
 def test_init_secrets_output_is_redacted(
@@ -106,7 +117,6 @@ def test_destroy_supplies_compose_interpolation_values_without_env(
 def test_compose_credentials_are_required_environment_variables() -> None:
     expected_counts = {
         "INFRAHUB_INITIAL_ADMIN_PASSWORD": 1,
-        "INFRAHUB_INITIAL_ADMIN_TOKEN": 2,
         "INFRAHUB_API_TOKEN": 3,
         "INFRAHUB_SECURITY_SECRET_KEY": 3,
         "SEMAPHORE_ADMIN_PASSWORD": 1,
@@ -123,6 +133,9 @@ def test_compose_credentials_are_required_environment_variables() -> None:
                 actual_counts[key] += 1
 
     assert actual_counts == expected_counts
+    compose_text = (tasks.MAIN_DIRECTORY_PATH / "docker-compose.yml").read_text()
+    assert "INFRAHUB_INITIAL_ADMIN_TOKEN: ${INFRAHUB_API_TOKEN:?Run uv run invoke init-secrets}" in compose_text
+    assert "${INFRAHUB_INITIAL_ADMIN_TOKEN:?" not in compose_text
 
 
 def test_inventory_uses_environment_token_and_example_has_no_secret_values() -> None:

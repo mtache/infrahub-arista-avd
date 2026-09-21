@@ -36,12 +36,12 @@ uv run invoke init-secrets
 ```
 
 The command adds only missing assignments to the ignored `.env` file, preserves existing values,
-sets mode `0600`, and does not print credential values. The value-free `.env.example` file lists
-every required variable.
+sets mode `0600`, and does not print credential values. The `.env.example` file keeps credential
+fields empty and lists every required variable.
 
-Docker Compose reads `.env` automatically. Values exported in the shell take precedence. On first
-initialization, `INFRAHUB_INITIAL_ADMIN_TOKEN` and `INFRAHUB_API_TOKEN` receive the same value so the
-service portal, task worker, and Semaphore can authenticate with the bootstrap administrator token.
+Docker Compose reads `.env` automatically. Values exported in the shell take precedence. The single
+`INFRAHUB_API_TOKEN` value is passed to Infrahub as the initial administrator token and to the service
+portal, task worker, and Semaphore for API authentication.
 
 Re-run `uv run invoke init-secrets` after deleting a value to generate only that missing assignment.
 

@@ -10,7 +10,7 @@ from time import sleep
 from uuid import uuid4
 
 import httpx
-from dotenv import dotenv_values, load_dotenv, set_key
+from dotenv import dotenv_values, load_dotenv, set_key, unset_key
 from invoke import Context, task
 from invoke.exceptions import Exit
 
@@ -33,7 +33,6 @@ COMPOSE_FILES = "-f docker-compose.yml -f docker-compose.override.yml"
 INFRAHUB_ADDRESS = os.getenv("INFRAHUB_ADDRESS", "http://localhost:8000")
 COMPOSE_REQUIRED_SECRET_NAMES = (
     "INFRAHUB_INITIAL_ADMIN_PASSWORD",
-    "INFRAHUB_INITIAL_ADMIN_TOKEN",
     "INFRAHUB_API_TOKEN",
     "INFRAHUB_SECURITY_SECRET_KEY",
     "SEMAPHORE_ADMIN_PASSWORD",
@@ -70,15 +69,13 @@ VALE_VERSION = "3.17.1"
 def _initialize_secrets(env_path: Path) -> tuple[str, ...]:
     """Generate missing local credentials while preserving existing assignments."""
     existing = dotenv_values(env_path) if env_path.exists() else {}
-    initial_token = existing.get("INFRAHUB_INITIAL_ADMIN_TOKEN")
-    api_token = existing.get("INFRAHUB_API_TOKEN")
-    shared_token = initial_token or api_token or str(uuid4())
+    legacy_initial_token = existing.get("INFRAHUB_INITIAL_ADMIN_TOKEN")
+    api_token = existing.get("INFRAHUB_API_TOKEN") or legacy_initial_token or str(uuid4())
 
     required_values = {
         "INFRAHUB_INITIAL_ADMIN_PASSWORD": lambda: secrets.token_urlsafe(32),
-        "INFRAHUB_INITIAL_ADMIN_TOKEN": lambda: shared_token,
-        "INFRAHUB_API_TOKEN": lambda: shared_token,
-        "INFRAHUB_SECURITY_SECRET_KEY": lambda: secrets.token_urlsafe(48),
+        "INFRAHUB_API_TOKEN": lambda: api_token,
+        "INFRAHUB_SECURITY_SECRET_KEY": lambda: str(uuid4()),
         "SEMAPHORE_ADMIN_PASSWORD": lambda: secrets.token_urlsafe(32),
     }
     missing = tuple(name for name in required_values if not existing.get(name))
@@ -88,6 +85,8 @@ def _initialize_secrets(env_path: Path) -> tuple[str, ...]:
         env_path.touch(mode=0o600)
     for name in missing:
         set_key(env_path, name, required_values[name](), quote_mode="never")
+    if "INFRAHUB_INITIAL_ADMIN_TOKEN" in existing:
+        unset_key(env_path, "INFRAHUB_INITIAL_ADMIN_TOKEN", quote_mode="never")
     env_path.chmod(0o600)
     _load_environment(env_path)
     return missing
