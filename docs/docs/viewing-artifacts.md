@@ -102,7 +102,9 @@ This means the structured-config generator hasn't run for the fabric yet. See th
 
 The artifacts are also accessible via the Infrahub API and through Ansible playbooks orchestrated by Semaphore at `http://localhost:3000`. Two playbook trees exist, and they consume different artifacts:
 
-- `ansible/` at the repository root — the tree Semaphore runs. `inventory.yml` builds the inventory from Infrahub and `deploy.yml` fetches each device's **AVD EOS Configuration** with `opsmill.infrahub.artifact_fetch`. `deploy_clab.yml` fetches the **ContainerLab Topology** artifact plus every device's EOS config, stages them on a ContainerLab host, and deploys the lab; see the [ContainerLab page](./containerlab.md).
+- `ansible/` at the repository root — the tree Semaphore runs. `inventory.yml` builds the deployment inventory from Infrahub and `deploy.yml` fetches each device's **AVD EOS Configuration** with `opsmill.infrahub.artifact_fetch`. `test.yml` discovers the selected fabric on `INFRAHUB_BRANCH`, fetches every device's **AVD ANTA Catalog**, and runs the **Validate with ANTA** template. `deploy_clab.yml` fetches the **ContainerLab Topology** artifact plus every device's EOS config, stages them on a ContainerLab host, and deploys the lab; see the [ContainerLab page](./containerlab.md).
 - `lab/playbooks/` — the AVD-toolchain playbooks for the committed lab (`build.yml`, `deploy.yml`, `deploy-eapi.yml`, `test.yml`), driven from `lab/Makefile`.
 
 Both need the `opsmill.infrahub` collection: `ansible-galaxy collection install -r ansible/galaxy-requirements.yml`.
+ANTA execution also needs `ANTA_PASSWORD` in the ignored `.env` file or exported before Semaphore starts;
+see the [Quick Start](./quick-start.md#2-initialize-local-credentials).
