@@ -44,8 +44,6 @@ initialization, `INFRAHUB_INITIAL_ADMIN_TOKEN` and `INFRAHUB_API_TOKEN` receive 
 service portal, task worker, and Semaphore can authenticate with the bootstrap administrator token.
 
 Re-run `uv run invoke init-secrets` after deleting a value to generate only that missing assignment.
-To rotate a token, update both token variables together. Current-tree cleanup does not remove values
-from existing Git history; repository maintainers must perform any historical rewrite separately.
 
 ## 3. Build the custom Infrahub image
 
