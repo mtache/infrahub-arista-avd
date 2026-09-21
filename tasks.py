@@ -31,6 +31,14 @@ VERSION = os.getenv("INFRAHUB_IMAGE_VER", None)
 
 COMPOSE_FILES = "-f docker-compose.yml -f docker-compose.override.yml"
 INFRAHUB_ADDRESS = os.getenv("INFRAHUB_ADDRESS", "http://localhost:8000")
+COMPOSE_REQUIRED_SECRET_NAMES = (
+    "INFRAHUB_INITIAL_ADMIN_PASSWORD",
+    "INFRAHUB_INITIAL_ADMIN_TOKEN",
+    "INFRAHUB_API_TOKEN",
+    "INFRAHUB_SECURITY_SECRET_KEY",
+    "SEMAPHORE_ADMIN_PASSWORD",
+)
+COMPOSE_LIFECYCLE_PLACEHOLDER = "unused-for-compose-lifecycle"
 
 os.environ.setdefault("INFRAHUB_USERNAME", "admin")
 if admin_password := os.getenv("INFRAHUB_INITIAL_ADMIN_PASSWORD"):
@@ -85,6 +93,11 @@ def _initialize_secrets(env_path: Path) -> tuple[str, ...]:
     return missing
 
 
+def _compose_lifecycle_environment() -> dict[str, str]:
+    """Satisfy Compose interpolation for commands that never consume credentials."""
+    return {name: os.environ.get(name) or COMPOSE_LIFECYCLE_PLACEHOLDER for name in COMPOSE_REQUIRED_SECRET_NAMES}
+
+
 @task(name="init-secrets")
 def init_secrets(_context: Context) -> None:
     """Create strong missing credentials in the ignored local .env file."""
@@ -113,7 +126,11 @@ def destroy(ctx: Context) -> None:
     """
     Stop and remove containers, networks, and volumes.
     """
-    ctx.run(f"docker compose {COMPOSE_FILES} down -v", pty=True)
+    ctx.run(
+        f"docker compose {COMPOSE_FILES} down -v",
+        pty=True,
+        env=_compose_lifecycle_environment(),
+    )
 
 
 class _SemaphoreClient:
@@ -449,7 +466,11 @@ def stop(ctx: Context) -> None:
     """
     Stop containers and remove networks.
     """
-    ctx.run(f"docker compose {COMPOSE_FILES} down", pty=True)
+    ctx.run(
+        f"docker compose {COMPOSE_FILES} down",
+        pty=True,
+        env=_compose_lifecycle_environment(),
+    )
 
 
 @task(help={"component": "Optional name of a specific service to restart."})
@@ -458,10 +479,18 @@ def restart(ctx: Context, component: str = "") -> None:
     Restart all services or a specific one using docker-compose.
     """
     if component:
-        ctx.run(f"docker compose {COMPOSE_FILES} restart {component}", pty=True)
+        ctx.run(
+            f"docker compose {COMPOSE_FILES} restart {component}",
+            pty=True,
+            env=_compose_lifecycle_environment(),
+        )
         return
 
-    ctx.run(f"docker compose {COMPOSE_FILES} restart", pty=True)
+    ctx.run(
+        f"docker compose {COMPOSE_FILES} restart",
+        pty=True,
+        env=_compose_lifecycle_environment(),
+    )
 
 
 @task

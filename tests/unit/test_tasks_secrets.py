@@ -78,6 +78,31 @@ def test_init_secrets_output_is_redacted(
     assert "Credential values were not displayed" in output
 
 
+def test_destroy_supplies_compose_interpolation_values_without_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in tasks.COMPOSE_REQUIRED_SECRET_NAMES:
+        monkeypatch.delenv(name, raising=False)
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def record_run(_context: Context, command: str, **kwargs: object) -> None:
+        calls.append((command, kwargs))
+
+    monkeypatch.setattr(Context, "run", record_run)
+    tasks.destroy.body(Context())
+
+    assert calls == [
+        (
+            f"docker compose {tasks.COMPOSE_FILES} down -v",
+            {
+                "pty": True,
+                "env": dict.fromkeys(tasks.COMPOSE_REQUIRED_SECRET_NAMES, tasks.COMPOSE_LIFECYCLE_PLACEHOLDER),
+            },
+        )
+    ]
+
+
 def test_compose_credentials_are_required_environment_variables() -> None:
     expected_counts = {
         "INFRAHUB_INITIAL_ADMIN_PASSWORD": 1,
