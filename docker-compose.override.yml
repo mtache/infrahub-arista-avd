@@ -51,7 +51,7 @@ services:
     environment:
       INFRAHUB_ADDRESS: http://infrahub-server:8000
       INFRAHUB_UI_URL: ${INFRAHUB_UI_URL:-http://localhost:8000}
-      INFRAHUB_API_TOKEN: ${INFRAHUB_INITIAL_ADMIN_TOKEN:-06438eb2-8019-4776-878c-0941b1f1d1ec}
+      INFRAHUB_API_TOKEN: ${INFRAHUB_API_TOKEN:?Run uv run invoke init-secrets}
       DEFAULT_BRANCH: ${INFRAHUB_INITIAL_DEFAULT_BRANCH:-main}
     ports:
       - "${STREAMLIT_PORT:-8501}:8501"
@@ -70,12 +70,12 @@ services:
     environment:
       SEMAPHORE_DB_DIALECT: sqlite
       SEMAPHORE_ADMIN: admin
-      SEMAPHORE_ADMIN_PASSWORD: semaphore
+      SEMAPHORE_ADMIN_PASSWORD: ${SEMAPHORE_ADMIN_PASSWORD:?Run uv run invoke init-secrets}
       SEMAPHORE_ADMIN_NAME: Admin
       SEMAPHORE_ADMIN_EMAIL: admin@localhost
       SEMAPHORE_FORWARDED_ENV_VARS: '["INFRAHUB_ADDRESS","INFRAHUB_API_TOKEN"]'
       INFRAHUB_ADDRESS: http://infrahub-server:8000
-      INFRAHUB_API_TOKEN: ${INFRAHUB_API_TOKEN:-44af444d-3b26-410d-9546-b758657e026c}
+      INFRAHUB_API_TOKEN: ${INFRAHUB_API_TOKEN:?Run uv run invoke init-secrets}
     ports:
       - "3000:3000"
     volumes:

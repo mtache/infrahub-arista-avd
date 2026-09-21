@@ -1,5 +1,6 @@
 import json
 import os
+import secrets
 import shlex
 import shutil
 import sys
@@ -8,23 +9,36 @@ from pathlib import Path
 from time import sleep
 
 import httpx
+from dotenv import dotenv_values, load_dotenv, set_key
 from invoke import Context, task
+from invoke.exceptions import Exit
+
+CURRENT_DIRECTORY = Path(__file__).resolve()
+MAIN_DIRECTORY_PATH = Path(__file__).parent
+ENV_FILE_PATH = MAIN_DIRECTORY_PATH / ".env"
+
+
+def _load_environment(env_path: Path) -> None:
+    """Load an environment file without replacing exported shell values."""
+    load_dotenv(env_path, override=False)
+
+
+_load_environment(ENV_FILE_PATH)
 
 # If no version is indicated, we will take the latest
 VERSION = os.getenv("INFRAHUB_IMAGE_VER", None)
-CURRENT_DIRECTORY = Path(__file__).resolve()
-MAIN_DIRECTORY_PATH = Path(__file__).parent
 
 COMPOSE_FILES = "-f docker-compose.yml -f docker-compose.override.yml"
 INFRAHUB_ADDRESS = os.getenv("INFRAHUB_ADDRESS", "http://localhost:8000")
 
 os.environ.setdefault("INFRAHUB_USERNAME", "admin")
-os.environ.setdefault("INFRAHUB_PASSWORD", "infrahub")
+if admin_password := os.getenv("INFRAHUB_INITIAL_ADMIN_PASSWORD"):
+    os.environ.setdefault("INFRAHUB_PASSWORD", admin_password)
 os.environ.setdefault("INFRAHUB_ADDRESS", INFRAHUB_ADDRESS)
 
 SEMAPHORE_URL = "http://localhost:3000"
 SEMAPHORE_ADMIN = "admin"
-SEMAPHORE_ADMIN_PASSWORD = "semaphore"  # noqa: S105
+SEMAPHORE_ADMIN_PASSWORD = os.getenv("SEMAPHORE_ADMIN_PASSWORD")
 SEMAPHORE_PLAYBOOK_PATH = "/opt/semaphore/playbooks"
 # Host path bind-mounted into the Semaphore container as the ContainerLab
 # staging directory, so files deploy_clab.yml pulls are reachable from the host.
@@ -42,6 +56,44 @@ PROSE_PATHS = "docs/docs"
 # Pinned so local runs match the CI job. Vale ships as a Go binary with no PyPI
 # distribution, so it cannot be a uv dev dependency like the other linters.
 VALE_VERSION = "3.17.1"
+
+
+def _initialize_secrets(env_path: Path) -> tuple[str, ...]:
+    """Generate missing local credentials while preserving existing assignments."""
+    existing = dotenv_values(env_path) if env_path.exists() else {}
+    initial_token = existing.get("INFRAHUB_INITIAL_ADMIN_TOKEN")
+    api_token = existing.get("INFRAHUB_API_TOKEN")
+    shared_token = initial_token or api_token or secrets.token_urlsafe(32)
+
+    required_values = {
+        "INFRAHUB_INITIAL_ADMIN_PASSWORD": lambda: secrets.token_urlsafe(32),
+        "INFRAHUB_INITIAL_ADMIN_TOKEN": lambda: shared_token,
+        "INFRAHUB_API_TOKEN": lambda: shared_token,
+        "INFRAHUB_INITIAL_AGENT_TOKEN": lambda: secrets.token_urlsafe(32),
+        "INFRAHUB_SECURITY_SECRET_KEY": lambda: secrets.token_urlsafe(48),
+        "SEMAPHORE_ADMIN_PASSWORD": lambda: secrets.token_urlsafe(32),
+    }
+    missing = tuple(name for name in required_values if not existing.get(name))
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    if not env_path.exists():
+        env_path.touch(mode=0o600)
+    for name in missing:
+        set_key(env_path, name, required_values[name](), quote_mode="never")
+    env_path.chmod(0o600)
+    _load_environment(env_path)
+    return missing
+
+
+@task(name="init-secrets")
+def init_secrets(_context: Context) -> None:
+    """Create strong missing credentials in the ignored local .env file."""
+    generated = _initialize_secrets(ENV_FILE_PATH)
+    if generated:
+        print(f"Generated {len(generated)} missing credential assignments in .env.")
+    else:
+        print("No credentials generated; existing .env values were preserved.")
+    print("Protected .env with mode 0600. Credential values were not displayed.")
 
 
 @task
@@ -169,7 +221,7 @@ def init_semaphore(
     context: Context,
     url: str = SEMAPHORE_URL,
     admin: str = SEMAPHORE_ADMIN,
-    password: str = SEMAPHORE_ADMIN_PASSWORD,
+    password: str | None = SEMAPHORE_ADMIN_PASSWORD,
     playbook_path: str = SEMAPHORE_PLAYBOOK_PATH,
 ) -> None:
     """Seed Semaphore with the project, repository, inventory, and task template.
@@ -177,6 +229,9 @@ def init_semaphore(
     Fully idempotent — each resource is looked up by name before creation.
     Safe to run multiple times; existing resources are reused.
     """
+    if not password:
+        raise Exit("SEMAPHORE_ADMIN_PASSWORD is required; run 'uv run invoke init-secrets' first.")
+
     print("=== Semaphore Init ===")
     ensure_clab_staging_dir()
 

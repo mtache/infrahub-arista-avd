@@ -34,6 +34,7 @@ const sidebars: SidebarsConfig = {
         'developer-guide/transforms',
         'developer-guide/checks',
         'developer-guide/concepts',
+        'developer-guide/security',
         {
           type: 'category',
           label: 'AVD Pipeline',

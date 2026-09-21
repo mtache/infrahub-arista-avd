@@ -2257,6 +2257,7 @@ source = { editable = "." }
 dependencies = [
     { name = "httpx" },
     { name = "pyavd" },
+    { name = "python-dotenv" },
     { name = "streamlit-flow-component" },
 ]
 
@@ -2264,7 +2265,6 @@ dependencies = [
 catalog = [
     { name = "infrahub-sdk" },
     { name = "pandas" },
-    { name = "python-dotenv" },
     { name = "streamlit" },
 ]
 dev = [
@@ -2284,6 +2284,7 @@ dev = [
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "pyavd", specifier = ">=6.3.0,<6.4.0" },
+    { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "streamlit-flow-component", specifier = ">=1.6.1" },
 ]
 
@@ -2291,7 +2292,6 @@ requires-dist = [
 catalog = [
     { name = "infrahub-sdk", specifier = ">=1.19.0,<2.0.0" },
     { name = "pandas", specifier = ">=2.0.0" },
-    { name = "python-dotenv", specifier = ">=1.0.0" },
     { name = "streamlit", specifier = ">=1.30.0" },
 ]
 dev = [

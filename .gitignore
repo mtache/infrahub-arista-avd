@@ -137,6 +137,7 @@ celerybeat.pid
 # Environments
 .env
 .env*
+!.env.example
 .venv
 .venv/
 env/
@@ -263,6 +264,7 @@ node_modules/
 
 # Local environment variants
 .env*
+!.env.example
 
 # Vale style packages, fetched by `vale sync`. Only .vale.ini and the project
 # vocabulary under .vale/config/ are tracked; the Google and write-good rule
