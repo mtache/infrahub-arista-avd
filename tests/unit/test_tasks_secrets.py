@@ -100,7 +100,7 @@ def test_compose_credentials_are_required_environment_variables() -> None:
     assert actual_counts == expected_counts
 
 
-def test_inventory_uses_environment_token_and_example_is_value_free() -> None:
+def test_inventory_uses_environment_token_and_example_has_no_secret_values() -> None:
     inventory_lines = (tasks.MAIN_DIRECTORY_PATH / "ansible/inventory.yml").read_text().splitlines()
     assert not any(line.strip().startswith("token:") for line in inventory_lines)
 
@@ -111,5 +111,11 @@ def test_inventory_uses_environment_token_and_example_is_value_free() -> None:
         for key, separator, value in (line.partition("="),)
         if separator
     }
-    assert set(example_assignments) == SECRET_NAMES
-    assert not any(example_assignments.values())
+    assert set(example_assignments) == SECRET_NAMES | {
+        "CLOUDVISION_SERVERS",
+        "CLOUDVISION_TOKEN",
+        "CLOUDVISION_VERIFY_CERTS",
+    }
+    assert not any(example_assignments[name] for name in SECRET_NAMES | {"CLOUDVISION_TOKEN"})
+    assert example_assignments["CLOUDVISION_SERVERS"] == "www.cv-prod-euwest-2.arista.io"
+    assert example_assignments["CLOUDVISION_VERIFY_CERTS"] == "true"
