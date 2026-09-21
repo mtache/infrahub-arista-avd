@@ -7,6 +7,7 @@ import sys
 import time
 from pathlib import Path
 from time import sleep
+from uuid import uuid4
 
 import httpx
 from dotenv import dotenv_values, load_dotenv, set_key
@@ -63,13 +64,12 @@ def _initialize_secrets(env_path: Path) -> tuple[str, ...]:
     existing = dotenv_values(env_path) if env_path.exists() else {}
     initial_token = existing.get("INFRAHUB_INITIAL_ADMIN_TOKEN")
     api_token = existing.get("INFRAHUB_API_TOKEN")
-    shared_token = initial_token or api_token or secrets.token_urlsafe(32)
+    shared_token = initial_token or api_token or str(uuid4())
 
     required_values = {
         "INFRAHUB_INITIAL_ADMIN_PASSWORD": lambda: secrets.token_urlsafe(32),
         "INFRAHUB_INITIAL_ADMIN_TOKEN": lambda: shared_token,
         "INFRAHUB_API_TOKEN": lambda: shared_token,
-        "INFRAHUB_INITIAL_AGENT_TOKEN": lambda: secrets.token_urlsafe(32),
         "INFRAHUB_SECURITY_SECRET_KEY": lambda: secrets.token_urlsafe(48),
         "SEMAPHORE_ADMIN_PASSWORD": lambda: secrets.token_urlsafe(32),
     }

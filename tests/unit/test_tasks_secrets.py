@@ -2,6 +2,7 @@ import os
 import secrets
 import stat
 from pathlib import Path
+from uuid import UUID
 
 import pytest
 from dotenv import dotenv_values
@@ -13,7 +14,6 @@ SECRET_NAMES = {
     "INFRAHUB_INITIAL_ADMIN_PASSWORD",
     "INFRAHUB_INITIAL_ADMIN_TOKEN",
     "INFRAHUB_API_TOKEN",
-    "INFRAHUB_INITIAL_AGENT_TOKEN",
     "INFRAHUB_SECURITY_SECRET_KEY",
     "SEMAPHORE_ADMIN_PASSWORD",
 }
@@ -27,7 +27,11 @@ def test_initialize_secrets_generates_strong_values_with_secure_permissions(tmp_
 
     assert generated == SECRET_NAMES
     assert set(values) == SECRET_NAMES
-    assert all(value is not None and len(value) >= 40 for value in values.values())
+    assert all(
+        values[name] is not None and len(values[name] or "") >= 40
+        for name in ("INFRAHUB_INITIAL_ADMIN_PASSWORD", "INFRAHUB_SECURITY_SECRET_KEY", "SEMAPHORE_ADMIN_PASSWORD")
+    )
+    assert UUID(values["INFRAHUB_INITIAL_ADMIN_TOKEN"] or "").version == 4
     assert values["INFRAHUB_INITIAL_ADMIN_TOKEN"] == values["INFRAHUB_API_TOKEN"]
     assert stat.S_IMODE(env_path.stat().st_mode) == 0o600
 
@@ -79,14 +83,15 @@ def test_compose_credentials_are_required_environment_variables() -> None:
         "INFRAHUB_INITIAL_ADMIN_PASSWORD": 1,
         "INFRAHUB_INITIAL_ADMIN_TOKEN": 2,
         "INFRAHUB_API_TOKEN": 3,
-        "INFRAHUB_INITIAL_AGENT_TOKEN": 2,
         "INFRAHUB_SECURITY_SECRET_KEY": 3,
         "SEMAPHORE_ADMIN_PASSWORD": 1,
     }
     actual_counts = dict.fromkeys(expected_counts, 0)
 
     for filename in ("docker-compose.yml", "docker-compose.override.yml"):
-        for line in (tasks.MAIN_DIRECTORY_PATH / filename).read_text().splitlines():
+        compose_text = (tasks.MAIN_DIRECTORY_PATH / filename).read_text()
+        assert "${INFRAHUB_INITIAL_AGENT_TOKEN:?" not in compose_text
+        for line in compose_text.splitlines():
             key, separator, value = line.strip().partition(":")
             if separator and key in expected_counts:
                 assert value.strip() == f"${{{key}:?Run uv run invoke init-secrets}}"
