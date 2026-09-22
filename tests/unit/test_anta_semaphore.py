@@ -263,7 +263,8 @@ def test_init_semaphore_registers_anta_with_the_infrahub_inventory(monkeypatch: 
     monkeypatch.setattr(tasks, "ensure_anta_workspace_dir", lambda: ROOT / "anta")
     monkeypatch.setattr(tasks, "_semaphore_staging_host_path", lambda *_args: "/host/clab-staging")
 
-    tasks.init_semaphore.body(Context(), password="test-admin-password")
+    fake_admin_password = object()
+    tasks.init_semaphore.body(Context(), password=fake_admin_password)
 
     resources = dict(api.created)
     resource_ids = {str(item["name"]): int(str(item["id"])) for items in api.resources.values() for item in items}
@@ -301,6 +302,9 @@ def test_anta_dependencies_are_pinned_to_avd_630() -> None:
     assert versions["opsmill.infrahub"] == "1.9.0"
     assert versions["arista.avd"] == "6.3.0"
     dockerfile = (ROOT / "semaphore" / "Dockerfile").read_text(encoding="utf-8")
+    assert "pip3 uninstall --yes ansible" in dockerfile
     assert '"ansible-core==2.19.13"' in dockerfile
     assert '"pyavd[ansible]==6.3.0"' in dockerfile
+    assert "pip3 check" in dockerfile
+    assert "ANSIBLE_COLLECTIONS_PATH=/opt/semaphore/collections:/usr/share/ansible/collections" in dockerfile
     assert "arista.avd:6.3.0" in dockerfile

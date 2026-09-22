@@ -565,17 +565,11 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         eos_content = next(content for content in eos_contents if "hostname" in content)
         assert eos_content.strip(), "EOS configuration artifact is empty"
 
-        anta_content, _ = await _fetch_ready_anta_artifact_for_fabric(
-            client,
-            PIPELINE_BRANCH,
-            FILTERED_ANTA_FABRIC,
-        )
+        anta_content, _ = await _fetch_ready_artifact_content(client, PIPELINE_BRANCH, ARTIFACT_AVD_ANTA_CATALOG)
         assert anta_content and anta_content.strip(), "ANTA catalog artifact is empty"
         assert ANTA_DISABLED_MARKER not in anta_content, (
             "ANTA catalog rendered the disabled marker despite anta_enabled"
         )
-        for test_name in FILTERED_ANTA_TESTS:
-            assert test_name not in anta_content, f"{test_name} remained in the ANTA catalog for {FILTERED_ANTA_FABRIC}"
 
         # ContainerLab Topology is fabric-scoped and, unlike the device-scoped
         # EOS/ANTA artifacts, does not auto-cascade on the branch — so generate it
@@ -1682,39 +1676,4 @@ async def _fetch_ready_artifact_content(
         target = (node.get("object") or {}).get("node") or {}
         content = await client.object_store.get(identifier=storage_id)
         return content, target.get("display_label")
-    return None, None
-
-
-async def _fetch_ready_anta_artifact_for_fabric(
-    client: InfrahubClient,
-    branch: str,
-    fabric_name: str,
-) -> tuple[str | None, str | None]:
-    """Return one Ready device ANTA artifact belonging to the selected fabric."""
-    query = (
-        "query {\n"
-        f'  CoreArtifact(name__value: "{ARTIFACT_AVD_ANTA_CATALOG}") {{\n'
-        "    edges { node {\n"
-        "      status { value }\n"
-        "      storage_id { value }\n"
-        "      object { node {\n"
-        "        display_label\n"
-        "        ... on DcimDevice {\n"
-        "          pod { node { parent { node { ... on NetworkFabric { name { value } } } } } }\n"
-        "        }\n"
-        "      } }\n"
-        "    } }\n"
-        "  }\n"
-        "}"
-    )
-    resp = await client.execute_graphql(query=query, branch_name=branch)
-    for edge in resp["CoreArtifact"]["edges"]:
-        node = edge["node"]
-        target = (node.get("object") or {}).get("node") or {}
-        parent = (((target.get("pod") or {}).get("node") or {}).get("parent") or {}).get("node") or {}
-        if node.get("status", {}).get("value") != "Ready" or (parent.get("name") or {}).get("value") != fabric_name:
-            continue
-        storage_id = (node.get("storage_id") or {}).get("value")
-        if storage_id:
-            return await client.object_store.get(identifier=storage_id), target.get("display_label")
     return None, None

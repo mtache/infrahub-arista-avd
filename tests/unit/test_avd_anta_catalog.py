@@ -87,6 +87,12 @@ def _transform(structured_config: dict | None = None) -> AvdAntaCatalogTransform
     return t
 
 
+def _catalog_test_names(catalog: str) -> set[str]:
+    """Return every ANTA test class name from a rendered YAML catalog."""
+    parsed = yaml.safe_load(catalog)
+    return {next(iter(test)) if isinstance(test, dict) else test for tests in parsed.values() for test in tests}
+
+
 async def test_disabled_fabric_returns_marker() -> None:
     result = await _transform().transform(_data(anta_enabled=False))
     assert result.startswith("# ANTA disabled for fabric Fabric-L3LS-MultiPod-A")
@@ -133,6 +139,23 @@ async def test_enabled_passes_typed_exclusions_to_catalog_generation(monkeypatch
     assert result == "anta.tests.fake: []\n"
     assert captured_settings is not None
     assert captured_settings.skip_tests == ("VerifyInterfaceDiscards", "VerifyLoggingErrors")
+
+
+async def test_enabled_excludes_tests_from_real_pyavd_catalog() -> None:
+    excluded_tests = {"VerifyInterfaceDiscards", "VerifyLoggingErrors"}
+
+    unfiltered = await _transform().transform(_data(anta_enabled=True))
+    filtered = await _transform().transform(
+        _data(
+            anta_enabled=True,
+            avd_catalogs_filters=sorted(excluded_tests),
+        )
+    )
+
+    assert excluded_tests <= _catalog_test_names(unfiltered)
+    filtered_test_names = _catalog_test_names(filtered)
+    assert filtered_test_names
+    assert excluded_tests.isdisjoint(filtered_test_names)
 
 
 if __name__ == "__main__":
