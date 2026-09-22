@@ -181,6 +181,21 @@ class _SemaphoreClient:
         return rid
 
 
+def _anta_environment_payload(project_id: int, workspace: str) -> dict[str, object]:
+    """Build the secret-free Semaphore environment used by ANTA runs."""
+    return {
+        "name": "ANTA",
+        "project_id": project_id,
+        "json": json.dumps(
+            {
+                "fabric_name": "",
+                "anta_workspace": workspace,
+            }
+        ),
+        "env": "{}",
+    }
+
+
 def ensure_clab_staging_dir() -> Path:
     """Create the ContainerLab staging directory the Semaphore container writes to.
 
@@ -319,6 +334,32 @@ def init_semaphore(
             "inventory_id": inv_id,
             "environment_id": env_id,
             "playbook": "deploy.yml",
+            "type": "task",
+            "app": "ansible",
+        },
+    )
+
+    print("ANTA environment...")
+    anta_container_workspace = f"{SEMAPHORE_PLAYBOOK_PATH.rsplit('/', 1)[0]}/clab-staging/anta"
+    anta_env_id = api.find_or_create(
+        f"/api/project/{project_id}/environment",
+        f"/api/project/{project_id}/environment",
+        "ANTA",
+        _anta_environment_payload(project_id, anta_container_workspace),
+    )
+
+    print("ANTA task template...")
+    api.find_or_create(
+        f"/api/project/{project_id}/templates",
+        f"/api/project/{project_id}/templates",
+        "Validate with ANTA",
+        {
+            "name": "Validate with ANTA",
+            "project_id": project_id,
+            "repository_id": repo_id,
+            "inventory_id": inv_id,
+            "environment_id": anta_env_id,
+            "playbook": "test.yml",
             "type": "task",
             "app": "ansible",
         },
