@@ -56,7 +56,7 @@ def test_network_link_reuses_dcim_connector_physical_endpoint_behavior() -> None
     assert network_link["display_label"] == "name__value"
 
 
-def test_network_link_role_supports_dci_choice_and_stays_optional() -> None:
+def test_network_link_role_supports_uplink_and_dci_choices_and_stays_optional() -> None:
     network_link = _node(_load_yaml("schemas/dcim_extensions.yml"), "Network", "Link")
     role = _attrs(network_link)["role"]
 
@@ -64,6 +64,7 @@ def test_network_link_role_supports_dci_choice_and_stays_optional() -> None:
 
     assert role["kind"] == "Dropdown"
     assert role["optional"] is True
+    assert choices["uplink"] == "Uplink"
     assert choices["dci"] == "DCI"
 
 
