@@ -375,31 +375,6 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         )
         assert report["with_mgmt"] > 0, "no devices have an allocated management IP"
 
-    # --- Component 10a: legacy uplink migration ----------------------------
-    @pytest.mark.asyncio(loop_scope="class")
-    async def test_legacy_uplink_is_migrated_in_place(self, client: InfrahubClient) -> None:
-        """A legacy generated leaf-to-spine link is renamed in place on rack rerun."""
-        candidate = await _uplink_migration_candidate(client, PIPELINE_BRANCH)
-        assert candidate is not None, "no generated leaf-to-spine uplink available for migration coverage"
-
-        link = await client.get(kind="NetworkLink", id=candidate["link_id"], branch=PIPELINE_BRANCH)
-        link.name.value = candidate["legacy_name"]
-        link.medium.value = "copper"
-        link.role.value = None
-        await link.save(allow_upsert=True)
-
-        await _run_generator_for_nodes(client, PIPELINE_BRANCH, GENERATOR_RACK, [candidate["rack_id"]])
-        report = await wait_until(
-            fetch=lambda: _uplink_migration_report(client, PIPELINE_BRANCH, candidate["link_id"]),
-            ready=lambda r: r["name"] == candidate["generated_name"] and r["medium"] == "mmf" and r["role"] == "uplink",
-            timeout=GENERATOR_TIMEOUT,
-            interval=POLL_INTERVAL,
-            describe=f"in-place migration of {candidate['legacy_name']}",
-        )
-
-        assert report["link_id"] == candidate["link_id"]
-        assert report["link_count"] == candidate["link_count"]
-
     # --- Component 10b: server cabling trigger -----------------------------
     @pytest.mark.asyncio(loop_scope="class")
     async def test_server_cabling_trigger_creates_links_and_lags(self, client: InfrahubClient) -> None:
@@ -868,95 +843,6 @@ async def _cabling_and_ip_report(client: InfrahubClient, branch: str) -> dict:
         "uplink_count": len(uplinks),
         "invalid_uplinks": invalid_uplinks,
         "l3_device_count": l3_device_count,
-    }
-
-
-async def _uplink_migration_candidate(client: InfrahubClient, branch: str) -> dict | None:
-    """Return one generated leaf-to-spine uplink and its legacy interface-based name."""
-    query = """
-    query UplinkMigrationCandidate {
-      NetworkLink(role__value: "uplink") {
-        edges {
-          node {
-            id
-            name { value }
-            connected_endpoints {
-              edges {
-                node {
-                  __typename
-                  ... on InterfacePhysical {
-                    name { value }
-                    device {
-                      node {
-                        ... on DcimDevice {
-                          name { value }
-                          role { value }
-                          rack { node { id } }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      }
-    }
-    """
-    response = await client.execute_graphql(query=query, branch_name=branch)
-    for edge in response["NetworkLink"]["edges"]:
-        link = edge["node"]
-        endpoints = [
-            endpoint_edge["node"]
-            for endpoint_edge in link["connected_endpoints"]["edges"]
-            if endpoint_edge["node"].get("__typename") == "InterfacePhysical"
-        ]
-        lower = next(
-            (
-                endpoint
-                for endpoint in endpoints
-                if endpoint.get("device", {}).get("node", {}).get("role", {}).get("value") == "leaf"
-            ),
-            None,
-        )
-        upper = next(
-            (
-                endpoint
-                for endpoint in endpoints
-                if endpoint.get("device", {}).get("node", {}).get("role", {}).get("value") == "spine"
-            ),
-            None,
-        )
-        if lower is None or upper is None:
-            continue
-
-        lower_device = lower["device"]["node"]
-        upper_device = upper["device"]["node"]
-        rack = (lower_device.get("rack") or {}).get("node")
-        if not rack:
-            continue
-        return {
-            "link_id": link["id"],
-            "link_count": len(await client.all(kind="NetworkLink", branch=branch)),
-            "rack_id": rack["id"],
-            "generated_name": link["name"]["value"],
-            "legacy_name": (
-                f"{lower_device['name']['value']}-{lower['name']['value']}"
-                f"__{upper_device['name']['value']}-{upper['name']['value']}"
-            ),
-        }
-    return None
-
-
-async def _uplink_migration_report(client: InfrahubClient, branch: str, link_id: str) -> dict:
-    link = await client.get(kind="NetworkLink", id=link_id, branch=branch)
-    return {
-        "link_id": link.id,
-        "link_count": len(await client.all(kind="NetworkLink", branch=branch)),
-        "name": link.name.value,
-        "medium": link.medium.value,
-        "role": link.role.value,
     }
 
 

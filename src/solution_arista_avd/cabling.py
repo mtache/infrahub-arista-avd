@@ -193,6 +193,11 @@ def _build_link_specs(
 
 
 def _device_name(interface: DcimInterface) -> str:
+    device = getattr(interface.device, "peer", None)
+    device_name = getattr(getattr(device, "name", None), "value", None)
+    if isinstance(device_name, str):
+        return device_name
+
     display_label = interface.device.display_label
     value = getattr(display_label, "value", display_label)
     return str(value)
