@@ -84,7 +84,7 @@ Services are modeled **schema-first**: L2 VLANs (L2LS), anycast SVIs on the camp
 
 | Capability | Status | Notes |
 |------------|:------:|-------|
-| ANTA test-catalog generation | ✅ | The `avd_anta_catalog` transform, gated by `anta_enabled`. |
+| ANTA test-catalog generation | ✅ | The `avd_anta_catalog` transform is gated by `anta_enabled`; fabric-level `avd_catalogs_filters` can exclude named tests. |
 | On-demand ANTA execution | ✅ | After deployment, the **Validate with ANTA** Semaphore task scopes the Infrahub `main` inventory to one fabric, fetches each device catalog, and writes JSON, Markdown, and CSV reports. See [Run ANTA after deployment](./how-to/run-anta-after-deployment.md). |
 | Proposed-change ANTA validation / block-merge-on-failure | ⬜ | Automatically running ANTA before merge and blocking a proposed change remains on the roadmap. |
 

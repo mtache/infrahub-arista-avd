@@ -5,7 +5,7 @@
   gather_facts: false
 
   vars:
-    default_anta_workspace: "/opt/semaphore/clab-staging/anta"
+    default_anta_workspace: "/opt/semaphore/anta"
 
   tasks:
     - name: Require a fabric name

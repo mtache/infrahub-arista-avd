@@ -14,8 +14,9 @@ from typing import Any
 
 from infrahub_sdk.transforms import InfrahubTransform
 from pyavd import get_device_test_catalog, validate_structured_config
-from pyavd.api.anta import AVDFabricData
+from pyavd.api.anta import AVDCatalogGenerationSettings, AVDFabricData
 
+from solution_arista_avd.avd import build_avd_catalogs_filters
 from solution_arista_avd.protocols import AvdStructuredConfigFile
 
 from .avd_anta_catalog_query import (
@@ -59,7 +60,13 @@ class AvdAntaCatalogTransform(InfrahubTransform):
             return f"# No structured config for {hostname}"
 
         fabric_data = AVDFabricData.from_structured_configs(configs)
-        catalog = get_device_test_catalog(hostname, target_sc, fabric_data)
+        filters = build_avd_catalogs_filters(
+            fabric.anta_enabled.value,
+            fabric.avd_catalogs_filters.value if fabric.avd_catalogs_filters else None,
+        )
+        skip_tests = tuple(filters[0]["skip_tests"]) if filters else ()
+        settings = AVDCatalogGenerationSettings(skip_tests=skip_tests)
+        catalog = get_device_test_catalog(hostname, target_sc, fabric_data, settings)
         return catalog.dump().yaml()
 
     @staticmethod

@@ -23,17 +23,28 @@ uv run invoke init-semaphore
 
 The Semaphore image contains `arista.avd` and matching PyAVD requirements at version `6.3.0`.
 `init-semaphore` creates the **Validate with ANTA** task, attaches the Infrahub dynamic inventory,
-and configures `/opt/semaphore/clab-staging/anta` as the report workspace. On the Docker host, the
-same files are under `lab/clab-staging/anta/`.
+and configures `/opt/semaphore/anta` as the report workspace. On the Docker host, the same files are
+under `anta/` at the repository root. It also detaches task templates from the obsolete **Empty**
+environment and removes that environment.
 
 ## 1. Prepare and merge the artifacts
 
 Before deployment:
 
 1. Enable `anta_enabled` on the target `NetworkFabric`.
-2. Run the generator chain on a working branch.
-3. Confirm every target device has a populated **AVD EOS Configuration** and **AVD ANTA Catalog**.
-4. Review the proposed change and merge it into `main`.
+2. Optionally populate `avd_catalogs_filters` with ANTA test names to exclude from every generated
+   catalog for that fabric.
+3. Run the generator chain on a working branch.
+4. Confirm every target device has a populated **AVD EOS Configuration** and **AVD ANTA Catalog**.
+5. Review the proposed change and merge it into `main`.
+
+`anta_enabled` controls Infrahub artifact generation. It is distinct from the Semaphore variable
+`anta_enable`, which tells ANTA to use EOS privileged mode. When `anta_enabled` is false, the skip-test
+list remains stored on the fabric but is not rendered into AVD hostvars or catalog settings.
+
+The bundled cEOS example skips `VerifyInterfaceDiscards` because Management1 can report startup
+discards, and `VerifyLoggingErrors` because cEOSLab has no physical platform identity. These are
+lab-specific exclusions; do not copy them to physical fabrics without validating the reason.
 
 The Semaphore task intentionally reads only `main`. It cannot validate branch artifacts before merge.
 
@@ -49,12 +60,25 @@ you plan to use.
 
 ## 3. Configure EOS credentials
 
-Choose one credential source. Values configured in the Semaphore environment take precedence over
-container environment variables.
+The provisioned **ANTA** environment defaults to the passwordless lab account and enables privileged
+mode:
+
+```json
+{
+  "fabric_name": "",
+  "anta_workspace": "/opt/semaphore/anta",
+  "anta_user": "admin",
+  "anta_password": "",
+  "anta_enable": true
+}
+```
+
+Edit these values for the deployed EOS account. Values configured in the Semaphore environment take
+precedence over container environment variables.
 
 ### Option A: configure the Semaphore environment
 
-In Semaphore, open **Environment → ANTA** and add these extra variables:
+In Semaphore, open **Environment → ANTA** and update these extra variables:
 
 ```json
 {
@@ -68,7 +92,8 @@ Never add credentials to the repository inventory or playbook.
 
 ### Option B: provide environment variables
 
-Export the variables before creating or recreating the Semaphore container:
+Remove `anta_user` and `anta_password` from the Semaphore environment first; otherwise its provisioned
+values take precedence. Then export the variables before creating or recreating the Semaphore container:
 
 ```bash
 export ANTA_USER=admin
@@ -106,7 +131,7 @@ Each run writes an isolated timestamped directory containing:
 - `user_catalogs/<device>.yml`
 
 The task output prints the container paths. With the bundled Compose stack, find the same run under
-`lab/clab-staging/anta/<fabric>-<timestamp>/` on the Docker host.
+`anta/<fabric>-<timestamp>/` on the Docker host.
 
 ## Troubleshooting
 
@@ -119,5 +144,8 @@ The task output prints the container paths. With the bundled Compose stack, find
 | `401 Unauthorized` | Confirm the deployed EOS account and password match the selected credentials and permit eAPI login. |
 | Connection refused, timeout, or no route to host | Verify management routing, HTTPS eAPI, access control lists, and that configuration deployment or CloudVision change control has completed. |
 | No tests executed | Confirm each fetched catalog contains tests tagged for its device and that every selected hostname matches the merged artifact target. |
+
+Excluded tests are removed while rendering the merged artifacts. Any other ANTA failure remains
+blocking and still fails the Semaphore task.
 
 For catalog-generation problems, see [Troubleshooting](../troubleshooting.md#the-anta-catalog-artifact-contains-only-a-comment).

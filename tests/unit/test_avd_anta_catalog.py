@@ -1,6 +1,7 @@
 """Unit tests for the AVD ANTA catalog transform."""
 
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,13 +12,18 @@ from transforms.avd_anta_catalog import AvdAntaCatalogTransform
 FABRIC_ID = "fabric-1"
 
 
-def _fabric_parent(anta_enabled: bool | None, name: str = "Fabric-L3LS-MultiPod-A") -> dict:
+def _fabric_parent(
+    anta_enabled: bool | None,
+    name: str = "Fabric-L3LS-MultiPod-A",
+    avd_catalogs_filters: object = None,
+) -> dict:
     return {
         "node": {
             "__typename": "NetworkFabric",
             "id": FABRIC_ID,
             "name": {"value": name},
             "anta_enabled": {"value": anta_enabled},
+            "avd_catalogs_filters": {"value": avd_catalogs_filters},
         }
     }
 
@@ -41,7 +47,13 @@ def _device(hostname: str, dev_id: str, *, with_sc: bool = True, fabric_id: str 
     return node
 
 
-def _data(*, anta_enabled: bool | None, target_found: bool = True, target_has_sc: bool = True) -> dict:
+def _data(
+    *,
+    anta_enabled: bool | None,
+    target_found: bool = True,
+    target_has_sc: bool = True,
+    avd_catalogs_filters: object = None,
+) -> dict:
     target_edges = []
     if target_found:
         target_edges = [
@@ -49,7 +61,12 @@ def _data(*, anta_enabled: bool | None, target_found: bool = True, target_has_sc
                 "node": {
                     "id": "dev-target",
                     "name": {"value": "leaf1"},
-                    "pod": {"node": {"id": "pod-t", "parent": _fabric_parent(anta_enabled)}},
+                    "pod": {
+                        "node": {
+                            "id": "pod-t",
+                            "parent": _fabric_parent(anta_enabled, avd_catalogs_filters=avd_catalogs_filters),
+                        }
+                    },
                 }
             }
         ]
@@ -95,6 +112,27 @@ async def test_enabled_produces_valid_yaml_catalog() -> None:
     assert not result.startswith("#")
     parsed = yaml.safe_load(result)
     assert isinstance(parsed, dict) and parsed  # non-empty ANTA catalog mapping
+
+
+async def test_enabled_passes_typed_exclusions_to_catalog_generation(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_settings = None
+
+    def fake_catalog(_hostname: str, _target_sc: object, _fabric_data: object, settings: object) -> object:
+        nonlocal captured_settings
+        captured_settings = settings
+        return SimpleNamespace(dump=lambda: SimpleNamespace(yaml=lambda: "anta.tests.fake: []\n"))
+
+    monkeypatch.setattr("transforms.avd_anta_catalog.get_device_test_catalog", fake_catalog)
+    result = await _transform().transform(
+        _data(
+            anta_enabled=True,
+            avd_catalogs_filters=["VerifyInterfaceDiscards", "VerifyLoggingErrors"],
+        )
+    )
+
+    assert result == "anta.tests.fake: []\n"
+    assert captured_settings is not None
+    assert captured_settings.skip_tests == ("VerifyInterfaceDiscards", "VerifyLoggingErrors")
 
 
 if __name__ == "__main__":

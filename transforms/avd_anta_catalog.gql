@@ -20,6 +20,9 @@ query AvdAntaCatalogQuery($name: String!) {
                   anta_enabled {
                     value
                   }
+                  avd_catalogs_filters {
+                    value
+                  }
                 }
               }
             }

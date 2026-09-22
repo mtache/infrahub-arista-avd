@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal, Optional, Union
+from typing import Annotated, Any, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -67,6 +67,9 @@ class AvdAntaCatalogQueryTargetEdgesNodePodNodeParentNodeNetworkFabric(BaseModel
     anta_enabled: Optional[
         "AvdAntaCatalogQueryTargetEdgesNodePodNodeParentNodeNetworkFabricAntaEnabled"
     ]
+    avd_catalogs_filters: Optional[
+        "AvdAntaCatalogQueryTargetEdgesNodePodNodeParentNodeNetworkFabricAvdCatalogsFilters"
+    ]
 
 
 class AvdAntaCatalogQueryTargetEdgesNodePodNodeParentNodeNetworkFabricName(BaseModel):
@@ -77,6 +80,12 @@ class AvdAntaCatalogQueryTargetEdgesNodePodNodeParentNodeNetworkFabricAntaEnable
     BaseModel
 ):
     value: Optional[bool]
+
+
+class AvdAntaCatalogQueryTargetEdgesNodePodNodeParentNodeNetworkFabricAvdCatalogsFilters(
+    BaseModel
+):
+    value: Optional[Any]
 
 
 class AvdAntaCatalogQueryDcimDevice(BaseModel):

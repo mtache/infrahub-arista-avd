@@ -4,6 +4,7 @@ USER root
 
 RUN apk add --no-cache python3 py3-pip && \
     pip3 install --break-system-packages \
+      "ansible-core==2.19.13" \
       infrahub-sdk \
       "pyavd[ansible]==6.3.0"
 
