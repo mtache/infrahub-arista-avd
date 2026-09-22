@@ -263,7 +263,7 @@ def test_init_semaphore_registers_anta_with_the_infrahub_inventory(monkeypatch: 
     monkeypatch.setattr(tasks, "ensure_anta_workspace_dir", lambda: ROOT / "anta")
     monkeypatch.setattr(tasks, "_semaphore_staging_host_path", lambda *_args: "/host/clab-staging")
 
-    tasks.init_semaphore.body(Context())
+    tasks.init_semaphore.body(Context(), password="test-admin-password")
 
     resources = dict(api.created)
     resource_ids = {str(item["name"]): int(str(item["id"])) for items in api.resources.values() for item in items}
