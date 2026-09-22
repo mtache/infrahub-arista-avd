@@ -279,7 +279,7 @@ class TestE2EPipeline(TestInfrahubDockerClient):
     @pytest.mark.asyncio(loop_scope="class")
     async def test_asn_nodes_created_and_linked(self, client: InfrahubClient) -> None:
         """RoutingAsn nodes are created, fabric-owned, and linked to every L3 device (C1);
-        each MLAG pair shares one ASN node across both leaves and the domain (C2).
+        each routed MLAG pair shares one ASN node across both leaves and the domain (C2).
 
         This is the regression guard for feature 002: before the fix, fabric
         generation produced zero Routing.Asn nodes.
@@ -305,12 +305,16 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         unlinked = [d["name"] for d in l3 if not d["asn_node_id"]]
         assert not unlinked, f"L3 devices without an ASN node: {unlinked}"
 
-        # C2 / SC-004: each MLAG domain shares one ASN node with both of its peers.
+        # C2 / SC-004: routed MLAG domains share one ASN with both peers. Pure
+        # Layer-2 MLAG domains intentionally have no routing ASN anywhere.
         asn_by_device = {d["id"]: d["asn_node_id"] for d in report["devices"]}
         for dom in report["domains"]:
             dom_asn = dom["asn_node_id"]
-            assert dom_asn, f"MLAG domain {dom['domain_id']} has no ASN node"
             peer_asns = {asn_by_device.get(pid) for pid in dom["peer_ids"]}
+            if peer_asns == {None}:
+                assert dom_asn is None, f"Pure Layer-2 MLAG domain {dom['domain_id']} unexpectedly has an ASN node"
+                continue
+            assert dom_asn, f"Routed MLAG domain {dom['domain_id']} has no ASN node"
             assert peer_asns == {dom_asn}, (
                 f"MLAG domain {dom['domain_id']} does not share one ASN node with its peers: "
                 f"domain={dom_asn} peers={peer_asns}"
@@ -1352,8 +1356,7 @@ async def _dci_leaf_candidates(client: InfrahubClient, branch: str) -> list[dict
     }
     """
     resp = await client.execute_graphql(query=query, branch_name=branch)
-    candidates = []
-    seen_fabric_id = None
+    candidates_by_fabric: dict[tuple[str, str], list[dict]] = {}
     for edge in resp["DcimDevice"]["edges"]:
         device = edge["node"]
         fabric = device.get("pod", {}).get("node", {}).get("parent", {}).get("node")
@@ -1363,11 +1366,8 @@ async def _dci_leaf_candidates(client: InfrahubClient, branch: str) -> list[dict
         device_asn = asn_node["asn"]["value"] if asn_node and asn_node.get("asn") else None
         if device_asn is None:
             continue
-        if seen_fabric_id is None:
-            seen_fabric_id = fabric["id"]
-        if fabric["id"] != seen_fabric_id:
-            continue
-        candidates.append(
+        fabric_key = (fabric["name"]["value"], fabric["id"])
+        candidates_by_fabric.setdefault(fabric_key, []).append(
             {
                 "device_id": device["id"],
                 "device_name": device["name"]["value"],
@@ -1378,10 +1378,19 @@ async def _dci_leaf_candidates(client: InfrahubClient, branch: str) -> list[dict
                 "interface_name": DCI_INTERFACE_NAME,
             }
         )
-    return sorted(candidates, key=itemgetter("device_name"))
+
+    for fabric_key in sorted(candidates_by_fabric):
+        candidates = sorted(candidates_by_fabric[fabric_key], key=itemgetter("device_name"))
+        if len(candidates) >= 2:
+            return candidates
+    return []
 
 
 async def _ensure_dci_pool(client: InfrahubClient, branch: str, fabric_id: str) -> None:
+    fabric = await client.get(kind="NetworkFabric", id=fabric_id, branch=branch, include=["dci_pool"])
+    if getattr(fabric.dci_pool, "id", None):
+        return
+
     prefix = await client.create(kind="IpamPrefix", branch=branch, prefix=DCI_POOL_PREFIX, role="technical")
     await prefix.save(allow_upsert=True)
     pool = await client.create(
@@ -1396,7 +1405,6 @@ async def _ensure_dci_pool(client: InfrahubClient, branch: str, fabric_id: str) 
     )
     await pool.save(allow_upsert=True)
 
-    fabric = await client.get(kind="NetworkFabric", id=fabric_id, branch=branch, include=["dci_pool"])
     fabric.dci_pool = pool
     await fabric.save(allow_upsert=True)
 

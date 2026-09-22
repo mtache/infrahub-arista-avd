@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+from sys import maxsize
 from typing import TYPE_CHECKING
 
 from .protocols import DcimDevice, DcimInterface, InterfacePhysical
@@ -19,23 +21,21 @@ def build_pod_cabling_plan(
 
     See tests/unit/test_cabling.py for the behavioural contract.
     """
-    dst_devices = list(dst_interface_map.keys())
+    src_items = _sorted_device_items(src_interface_map)
+    dst_items = _sorted_device_items(dst_interface_map)
+    dst_devices = [device for device, _interfaces in dst_items]
     dst_device_count = len(dst_devices)
     dst_interface_base_index = (pod_index - 2) * len(dst_interface_map)
-    src_index = 0
 
     cabling_plan: list[tuple[DcimInterface, DcimInterface]] = []
 
-    for src_interfaces in src_interface_map.values():
+    for src_index, (_src_device, src_interfaces) in enumerate(src_items):
         dst_interface_index = dst_interface_base_index + src_index
 
         for dst_index, src_interface in enumerate(src_interfaces[:dst_device_count]):
             dst_interface = dst_interface_map[dst_devices[dst_index]][dst_interface_index]
 
             cabling_plan.append((src_interface, dst_interface))
-
-        src_index += 1  # noqa: SIM113 replace with enumerate
-        dst_interface_index = dst_interface_base_index + src_index
 
     return cabling_plan
 
@@ -46,12 +46,14 @@ def build_rack_cabling_plan(
     dst_interface_map: dict[DcimDevice, list[DcimInterface]],
 ) -> list[tuple[DcimInterface, DcimInterface]]:
     cabling_plan: list[tuple[DcimInterface, DcimInterface]] = []
-    dst_devices = list(dst_interface_map.keys())
+    src_items = _sorted_device_items(src_interface_map)
+    dst_items = _sorted_device_items(dst_interface_map)
+    dst_devices = [device for device, _interfaces in dst_items]
     dst_device_count = len(dst_devices)
     start = (rack_index * 2) - 2
     end = start + 2
 
-    for fallback_index, (src_device, src_interfaces) in enumerate(src_interface_map.items(), start=1):
+    for fallback_index, (src_device, src_interfaces) in enumerate(src_items, start=1):
         src_device_index = _rack_source_device_index(src_device, fallback=fallback_index)
 
         for dst_index, src_interface in enumerate(src_interfaces[:dst_device_count]):
@@ -90,11 +92,13 @@ def build_server_cabling_plan(
     round-robin across leaves. Follows the same index-based pattern as
     build_pod_cabling_plan and build_rack_cabling_plan.
     """
-    dst_devices = list(dst_interface_map.keys())
+    src_items = _sorted_device_items(src_interface_map)
+    dst_items = _sorted_device_items(dst_interface_map)
+    dst_devices = [device for device, _interfaces in dst_items]
     dst_device_count = len(dst_devices)
     cabling_plan: list[tuple[DcimInterface, DcimInterface]] = []
 
-    for src_interfaces in src_interface_map.values():
+    for _src_device, src_interfaces in src_items:
         for i, src_interface in enumerate(src_interfaces):
             dst_device = dst_devices[i % dst_device_count]
             dst_offset = server_index + (i // dst_device_count)
@@ -102,6 +106,44 @@ def build_server_cabling_plan(
             cabling_plan.append((src_interface, dst_interface))
 
     return cabling_plan
+
+
+def _sorted_device_items(
+    interface_map: dict[DcimDevice, list[DcimInterface]],
+) -> list[tuple[DcimDevice, list[DcimInterface]]]:
+    """Return interface-map entries in a stable topology order.
+
+    Infrahub does not guarantee GraphQL edge order. Cabling plans therefore
+    cannot use dictionary insertion order to decide which devices are paired.
+    Prefer the explicit device index, then a naturally sorted hostname, with
+    the immutable node ID as the final tie-breaker.
+    """
+    return sorted(interface_map.items(), key=lambda item: _device_order_key(item[0]))
+
+
+def _device_order_key(device: DcimDevice) -> tuple[int, tuple[tuple[int, str | int], ...], str]:
+    index = _positive_int(getattr(getattr(device, "index", None), "value", None))
+    name = _device_text_value(device, "name") or _device_text_value(device, "display_label")
+    device_id = getattr(device, "id", "")
+    return index if index is not None else maxsize, _natural_sort_key(name), str(device_id)
+
+
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+        return value
+    if isinstance(value, str) and value.isdecimal() and int(value) > 0:
+        return int(value)
+    return None
+
+
+def _device_text_value(device: DcimDevice, attribute_name: str) -> str:
+    attribute = getattr(device, attribute_name, None)
+    value = getattr(attribute, "value", attribute)
+    return value if isinstance(value, str) else ""
+
+
+def _natural_sort_key(value: str) -> tuple[tuple[int, str | int], ...]:
+    return tuple((1, int(part)) if part.isdecimal() else (0, part.casefold()) for part in re.split(r"(\d+)", value))
 
 
 async def connect_interface_maps(

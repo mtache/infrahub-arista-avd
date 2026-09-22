@@ -12,7 +12,12 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from solution_arista_avd.cabling import build_pod_cabling_plan, build_rack_cabling_plan, connect_interface_maps
+from solution_arista_avd.cabling import (
+    build_pod_cabling_plan,
+    build_rack_cabling_plan,
+    build_server_cabling_plan,
+    connect_interface_maps,
+)
 
 
 def _iface(iface_id: str) -> MagicMock:
@@ -22,18 +27,18 @@ def _iface(iface_id: str) -> MagicMock:
     return iface
 
 
-def _device(index: int | None = None) -> MagicMock:
+def _device(index: int | None = None, *, name: str = "", device_id: str = "") -> MagicMock:
     """A mock device; build_rack_cabling_plan reads device.index.value."""
     device = MagicMock()
+    device.id = device_id
     device.index.value = index
+    device.name.value = name
+    device.display_label = name
     return device
 
 
 def _device_without_hydrated_index(name: str) -> MagicMock:
-    device = MagicMock()
-    device.index.value = None
-    device.name.value = name
-    return device
+    return _device(name=name, device_id=name)
 
 
 def _ids(plan: list[tuple[MagicMock, MagicMock]]) -> list[tuple[str, str]]:
@@ -90,6 +95,39 @@ class TestBuildPodCablingPlan:
             ("sp2-i0", "ss1-3"),
             ("sp2-i1", "ss2-3"),
         ]
+
+    def test_device_map_insertion_order_does_not_change_plan(self) -> None:
+        spine2 = _device(name="spine-2", device_id="spine-2")
+        spine10 = _device(name="spine-10", device_id="spine-10")
+        super_spine2 = _device(name="super-spine-2", device_id="super-spine-2")
+        super_spine10 = _device(name="super-spine-10", device_id="super-spine-10")
+        spine2_interfaces = [_iface("sp2-i0"), _iface("sp2-i1")]
+        spine10_interfaces = [_iface("sp10-i0"), _iface("sp10-i1")]
+        super_spine2_interfaces = [_iface(f"ss2-{index}") for index in range(4)]
+        super_spine10_interfaces = [_iface(f"ss10-{index}") for index in range(4)]
+
+        expected = _ids(
+            build_pod_cabling_plan(
+                pod_index=2,
+                src_interface_map={spine2: spine2_interfaces, spine10: spine10_interfaces},
+                dst_interface_map={
+                    super_spine2: super_spine2_interfaces,
+                    super_spine10: super_spine10_interfaces,
+                },
+            )
+        )
+        reordered = _ids(
+            build_pod_cabling_plan(
+                pod_index=2,
+                src_interface_map={spine10: spine10_interfaces, spine2: spine2_interfaces},
+                dst_interface_map={
+                    super_spine10: super_spine10_interfaces,
+                    super_spine2: super_spine2_interfaces,
+                },
+            )
+        )
+
+        assert reordered == expected
 
 
 class TestBuildRackCablingPlan:
@@ -156,6 +194,62 @@ class TestBuildRackCablingPlan:
             ("l2leaf-i0", "leaf1-2"),
             ("l2leaf-i1", "leaf2-2"),
         ]
+
+    def test_device_map_insertion_order_does_not_change_plan(self) -> None:
+        leaf1 = _device(index=1, name="leaf-1", device_id="leaf-1")
+        leaf2 = _device(index=2, name="leaf-2", device_id="leaf-2")
+        spine1 = _device(index=1, name="spine-1", device_id="spine-1")
+        spine2 = _device(index=2, name="spine-2", device_id="spine-2")
+        leaf1_interfaces = [_iface("l1-i0"), _iface("l1-i1")]
+        leaf2_interfaces = [_iface("l2-i0"), _iface("l2-i1")]
+        spine1_interfaces = [_iface(f"sp1-{index}") for index in range(4)]
+        spine2_interfaces = [_iface(f"sp2-{index}") for index in range(4)]
+
+        expected = _ids(
+            build_rack_cabling_plan(
+                rack_index=1,
+                src_interface_map={leaf1: leaf1_interfaces, leaf2: leaf2_interfaces},
+                dst_interface_map={spine1: spine1_interfaces, spine2: spine2_interfaces},
+            )
+        )
+        reordered = _ids(
+            build_rack_cabling_plan(
+                rack_index=1,
+                src_interface_map={leaf2: leaf2_interfaces, leaf1: leaf1_interfaces},
+                dst_interface_map={spine2: spine2_interfaces, spine1: spine1_interfaces},
+            )
+        )
+
+        assert reordered == expected
+
+
+class TestBuildServerCablingPlan:
+    def test_device_map_insertion_order_does_not_change_plan(self) -> None:
+        server1 = _device(index=1, name="server-1", device_id="server-1")
+        server2 = _device(index=2, name="server-2", device_id="server-2")
+        leaf1 = _device(index=1, name="leaf-1", device_id="leaf-1")
+        leaf2 = _device(index=2, name="leaf-2", device_id="leaf-2")
+        server1_interfaces = [_iface("server1-i0"), _iface("server1-i1")]
+        server2_interfaces = [_iface("server2-i0"), _iface("server2-i1")]
+        leaf1_interfaces = [_iface("leaf1-i0")]
+        leaf2_interfaces = [_iface("leaf2-i0")]
+
+        expected = _ids(
+            build_server_cabling_plan(
+                server_index=0,
+                src_interface_map={server1: server1_interfaces, server2: server2_interfaces},
+                dst_interface_map={leaf1: leaf1_interfaces, leaf2: leaf2_interfaces},
+            )
+        )
+        reordered = _ids(
+            build_server_cabling_plan(
+                server_index=0,
+                src_interface_map={server2: server2_interfaces, server1: server1_interfaces},
+                dst_interface_map={leaf2: leaf2_interfaces, leaf1: leaf1_interfaces},
+            )
+        )
+
+        assert reordered == expected
 
 
 def _physical_interface(
