@@ -2,13 +2,13 @@
 
 import pytest
 
-from avd_catalogs_filters import build_avd_catalogs_filters
 from solution_arista_avd.avd import (
     LEAF_ROLE_BY_UNDERLAY,
     MLAG_MAIN_TIER_ROLES,
     ROLE_TO_AVD_TYPE,
     SPINE_ROLE_BY_UNDERLAY,
     SPINE_UPLINK_UNDERLAYS,
+    build_avd_catalogs_filters,
     get_avd_type,
 )
 from tests.unit.test_avd_example_fabrics_schema_contract import (

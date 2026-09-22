@@ -10,16 +10,26 @@ a single ``AVDFabricData`` instance.
 """
 
 import json
+import sys
+from pathlib import Path
 from typing import Any
 
 from infrahub_sdk.transforms import InfrahubTransform
 from pyavd import get_device_test_catalog, validate_structured_config
 from pyavd.api.anta import AVDCatalogGenerationSettings, AVDFabricData
 
-from avd_catalogs_filters import build_avd_catalogs_filters
-from solution_arista_avd.protocols import AvdStructuredConfigFile
+_REPO_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_REPO_SRC) not in sys.path:
+    sys.path.insert(0, str(_REPO_SRC))
+_PACKAGE_ROOT = _REPO_SRC / "solution_arista_avd"
+if (package := sys.modules.get("solution_arista_avd")) is not None and hasattr(package, "__path__"):
+    package.__path__ = [str(_PACKAGE_ROOT), *[path for path in package.__path__ if path != str(_PACKAGE_ROOT)]]
+sys.modules.pop("solution_arista_avd.avd", None)
 
-from .avd_anta_catalog_query import (
+from solution_arista_avd.avd import build_avd_catalogs_filters  # noqa: E402
+from solution_arista_avd.protocols import AvdStructuredConfigFile  # noqa: E402
+
+from .avd_anta_catalog_query import (  # noqa: E402
     AvdAntaCatalogQuery,
     AvdAntaCatalogQueryDcimDeviceEdgesNode,
     AvdAntaCatalogQueryTargetEdgesNode,
