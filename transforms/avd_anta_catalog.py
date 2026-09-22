@@ -16,7 +16,7 @@ from infrahub_sdk.transforms import InfrahubTransform
 from pyavd import get_device_test_catalog, validate_structured_config
 from pyavd.api.anta import AVDCatalogGenerationSettings, AVDFabricData
 
-from solution_arista_avd.avd import build_avd_catalogs_filters
+from avd_catalogs_filters import build_avd_catalogs_filters
 from solution_arista_avd.protocols import AvdStructuredConfigFile
 
 from .avd_anta_catalog_query import (

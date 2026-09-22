@@ -16,6 +16,8 @@ from infrahub_sdk.generator import InfrahubGenerator
 from netutils.interface import sort_interface_list
 from netutils.vlan import vlanlist_to_config
 
+from avd_catalogs_filters import build_avd_catalogs_filters
+
 _REPO_SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_REPO_SRC) not in sys.path:
     sys.path.insert(0, str(_REPO_SRC))
@@ -45,7 +47,6 @@ from solution_arista_avd.avd import (  # noqa: E402
     SPINE_UPLINK_LEAF_ROLES,
     SPINE_UPLINK_UNDERLAYS,
     SVI_RENDERING_ROLES,
-    build_avd_catalogs_filters,
 )
 from solution_arista_avd.avd import get_avd_type as _get_package_avd_type  # noqa: E402
 from solution_arista_avd.generator import (  # noqa: E402
