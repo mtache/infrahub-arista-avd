@@ -1,30 +1,52 @@
 import json
 import os
+import secrets
 import shlex
 import shutil
 import sys
 import time
 from pathlib import Path
 from time import sleep
+from uuid import uuid4
 
 import httpx
+from dotenv import dotenv_values, load_dotenv, set_key, unset_key
 from invoke import Context, task
+from invoke.exceptions import Exit
+
+CURRENT_DIRECTORY = Path(__file__).resolve()
+MAIN_DIRECTORY_PATH = Path(__file__).parent
+ENV_FILE_PATH = MAIN_DIRECTORY_PATH / ".env"
+
+
+def _load_environment(env_path: Path) -> None:
+    """Load an environment file without replacing exported shell values."""
+    load_dotenv(env_path, override=False)
+
+
+_load_environment(ENV_FILE_PATH)
 
 # If no version is indicated, we will take the latest
 VERSION = os.getenv("INFRAHUB_IMAGE_VER", None)
-CURRENT_DIRECTORY = Path(__file__).resolve()
-MAIN_DIRECTORY_PATH = Path(__file__).parent
 
 COMPOSE_FILES = "-f docker-compose.yml -f docker-compose.override.yml"
 INFRAHUB_ADDRESS = os.getenv("INFRAHUB_ADDRESS", "http://localhost:8000")
+COMPOSE_REQUIRED_SECRET_NAMES = (
+    "INFRAHUB_INITIAL_ADMIN_PASSWORD",
+    "INFRAHUB_API_TOKEN",
+    "INFRAHUB_SECURITY_SECRET_KEY",
+    "SEMAPHORE_ADMIN_PASSWORD",
+)
+COMPOSE_LIFECYCLE_PLACEHOLDER = "unused-for-compose-lifecycle"
 
 os.environ.setdefault("INFRAHUB_USERNAME", "admin")
-os.environ.setdefault("INFRAHUB_PASSWORD", "infrahub")
+if admin_password := os.getenv("INFRAHUB_INITIAL_ADMIN_PASSWORD"):
+    os.environ.setdefault("INFRAHUB_PASSWORD", admin_password)
 os.environ.setdefault("INFRAHUB_ADDRESS", INFRAHUB_ADDRESS)
 
 SEMAPHORE_URL = "http://localhost:3000"
 SEMAPHORE_ADMIN = "admin"
-SEMAPHORE_ADMIN_PASSWORD = "semaphore"  # noqa: S105
+SEMAPHORE_ADMIN_PASSWORD = os.getenv("SEMAPHORE_ADMIN_PASSWORD")
 SEMAPHORE_PLAYBOOK_PATH = "/opt/semaphore/playbooks"
 # Host path bind-mounted into the Semaphore container as the ContainerLab
 # staging directory, so files deploy_clab.yml pulls are reachable from the host.
@@ -44,6 +66,48 @@ PROSE_PATHS = "docs/docs"
 VALE_VERSION = "3.17.1"
 
 
+def _initialize_secrets(env_path: Path) -> tuple[str, ...]:
+    """Generate missing local credentials while preserving existing assignments."""
+    existing = dotenv_values(env_path) if env_path.exists() else {}
+    legacy_initial_token = existing.get("INFRAHUB_INITIAL_ADMIN_TOKEN")
+    api_token = existing.get("INFRAHUB_API_TOKEN") or legacy_initial_token or str(uuid4())
+
+    required_values = {
+        "INFRAHUB_INITIAL_ADMIN_PASSWORD": lambda: secrets.token_urlsafe(32),
+        "INFRAHUB_API_TOKEN": lambda: api_token,
+        "INFRAHUB_SECURITY_SECRET_KEY": lambda: str(uuid4()),
+        "SEMAPHORE_ADMIN_PASSWORD": lambda: secrets.token_urlsafe(32),
+    }
+    missing = tuple(name for name in required_values if not existing.get(name))
+
+    env_path.parent.mkdir(parents=True, exist_ok=True)
+    if not env_path.exists():
+        env_path.touch(mode=0o600)
+    for name in missing:
+        set_key(env_path, name, required_values[name](), quote_mode="never")
+    if "INFRAHUB_INITIAL_ADMIN_TOKEN" in existing:
+        unset_key(env_path, "INFRAHUB_INITIAL_ADMIN_TOKEN", quote_mode="never")
+    env_path.chmod(0o600)
+    _load_environment(env_path)
+    return missing
+
+
+def _compose_lifecycle_environment() -> dict[str, str]:
+    """Satisfy Compose interpolation for commands that never consume credentials."""
+    return {name: os.environ.get(name) or COMPOSE_LIFECYCLE_PLACEHOLDER for name in COMPOSE_REQUIRED_SECRET_NAMES}
+
+
+@task(name="init-secrets")
+def init_secrets(_context: Context) -> None:
+    """Create strong missing credentials in the ignored local .env file."""
+    generated = _initialize_secrets(ENV_FILE_PATH)
+    if generated:
+        print(f"Generated {len(generated)} missing credential assignments in .env.")
+    else:
+        print("No credentials generated; existing .env values were preserved.")
+    print("Protected .env with mode 0600. Credential values were not displayed.")
+
+
 @task
 def build(ctx: Context, cache: bool = True) -> None:
     """
@@ -61,7 +125,11 @@ def destroy(ctx: Context) -> None:
     """
     Stop and remove containers, networks, and volumes.
     """
-    ctx.run(f"docker compose {COMPOSE_FILES} down -v", pty=True)
+    ctx.run(
+        f"docker compose {COMPOSE_FILES} down -v",
+        pty=True,
+        env=_compose_lifecycle_environment(),
+    )
 
 
 class _SemaphoreClient:
@@ -169,7 +237,7 @@ def init_semaphore(
     context: Context,
     url: str = SEMAPHORE_URL,
     admin: str = SEMAPHORE_ADMIN,
-    password: str = SEMAPHORE_ADMIN_PASSWORD,
+    password: str | None = SEMAPHORE_ADMIN_PASSWORD,
     playbook_path: str = SEMAPHORE_PLAYBOOK_PATH,
 ) -> None:
     """Seed Semaphore with the project, repository, inventory, and task template.
@@ -177,6 +245,9 @@ def init_semaphore(
     Fully idempotent — each resource is looked up by name before creation.
     Safe to run multiple times; existing resources are reused.
     """
+    if not password:
+        raise Exit("SEMAPHORE_ADMIN_PASSWORD is required; run 'uv run invoke init-secrets' first.")
+
     print("=== Semaphore Init ===")
     ensure_clab_staging_dir()
 
@@ -394,7 +465,11 @@ def stop(ctx: Context) -> None:
     """
     Stop containers and remove networks.
     """
-    ctx.run(f"docker compose {COMPOSE_FILES} down", pty=True)
+    ctx.run(
+        f"docker compose {COMPOSE_FILES} down",
+        pty=True,
+        env=_compose_lifecycle_environment(),
+    )
 
 
 @task(help={"component": "Optional name of a specific service to restart."})
@@ -403,10 +478,18 @@ def restart(ctx: Context, component: str = "") -> None:
     Restart all services or a specific one using docker-compose.
     """
     if component:
-        ctx.run(f"docker compose {COMPOSE_FILES} restart {component}", pty=True)
+        ctx.run(
+            f"docker compose {COMPOSE_FILES} restart {component}",
+            pty=True,
+            env=_compose_lifecycle_environment(),
+        )
         return
 
-    ctx.run(f"docker compose {COMPOSE_FILES} restart", pty=True)
+    ctx.run(
+        f"docker compose {COMPOSE_FILES} restart",
+        pty=True,
+        env=_compose_lifecycle_environment(),
+    )
 
 
 @task
