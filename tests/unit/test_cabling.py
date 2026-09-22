@@ -246,22 +246,22 @@ class TestConnectInterfaceMaps:
         assert dst_fetched_iface.connector is network_link
 
     @pytest.mark.asyncio
-    async def test_migrates_attached_legacy_uplink_in_place(self) -> None:
-        legacy_name = "leaf-1-Ethernet49__spine-1-Ethernet1"
+    async def test_reuses_attached_current_uplink_and_reconciles_metadata(self) -> None:
+        uplink_name = "Uplink leaf-1__spine-1"
         src_query_iface = _physical_interface("src-query", "leaf-1", "Ethernet49")
         dst_query_iface = _physical_interface("dst-query", "spine-1", "Ethernet1")
-        src_fetched_iface = _physical_interface("src-query", "leaf-1", "Ethernet49", connector_id="legacy-link")
-        dst_fetched_iface = _physical_interface("dst-query", "spine-1", "Ethernet1", connector_id="legacy-link")
-        legacy_link = SimpleNamespace(
-            id="legacy-link",
-            name=SimpleNamespace(value=legacy_name),
+        src_fetched_iface = _physical_interface("src-query", "leaf-1", "Ethernet49", connector_id="uplink")
+        dst_fetched_iface = _physical_interface("dst-query", "spine-1", "Ethernet1", connector_id="uplink")
+        uplink = SimpleNamespace(
+            id="uplink",
+            name=SimpleNamespace(value=uplink_name),
             medium=SimpleNamespace(value="copper"),
             role=SimpleNamespace(value=None),
             save=AsyncMock(),
         )
         client = SimpleNamespace(
             create=AsyncMock(),
-            get=AsyncMock(side_effect=[src_fetched_iface, dst_fetched_iface, legacy_link]),
+            get=AsyncMock(side_effect=[src_fetched_iface, dst_fetched_iface, uplink]),
         )
         logger = MagicMock()
 
@@ -274,12 +274,48 @@ class TestConnectInterfaceMaps:
         )
 
         client.create.assert_not_awaited()
-        legacy_link.save.assert_awaited_once_with(allow_upsert=True)
-        assert legacy_link.name.value == "Uplink leaf-1__spine-1"
-        assert legacy_link.medium.value == "mmf"
-        assert legacy_link.role.value == "uplink"
+        uplink.save.assert_awaited_once_with(allow_upsert=True)
+        assert uplink.name.value == uplink_name
+        assert uplink.medium.value == "mmf"
+        assert uplink.role.value == "uplink"
         src_fetched_iface.save.assert_not_awaited()
         dst_fetched_iface.save.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_does_not_rename_attached_link_with_different_name(self) -> None:
+        src_query_iface = _physical_interface("src-query", "leaf-1", "Ethernet49")
+        dst_query_iface = _physical_interface("dst-query", "spine-1", "Ethernet1")
+        src_fetched_iface = _physical_interface("src-query", "leaf-1", "Ethernet49", connector_id="existing")
+        dst_fetched_iface = _physical_interface("dst-query", "spine-1", "Ethernet1", connector_id="existing")
+        existing_link = SimpleNamespace(
+            id="existing",
+            name=SimpleNamespace(value="leaf-1-Ethernet49__spine-1-Ethernet1"),
+            medium=SimpleNamespace(value="copper"),
+            role=SimpleNamespace(value=None),
+            save=AsyncMock(),
+        )
+        client = SimpleNamespace(
+            create=AsyncMock(),
+            get=AsyncMock(side_effect=[src_fetched_iface, dst_fetched_iface, existing_link]),
+        )
+        logger = MagicMock()
+
+        await connect_interface_maps(
+            client,
+            logger,
+            [(src_query_iface, dst_query_iface)],  # type: ignore[arg-type]
+            link_role="uplink",
+            medium="mmf",
+        )
+
+        client.create.assert_not_awaited()
+        existing_link.save.assert_not_awaited()
+        assert existing_link.name.value == "leaf-1-Ethernet49__spine-1-Ethernet1"
+        assert existing_link.medium.value == "copper"
+        assert existing_link.role.value is None
+        src_fetched_iface.save.assert_not_awaited()
+        dst_fetched_iface.save.assert_not_awaited()
+        assert any("Preserved existing connector" in call.args[0] for call in logger.warning.call_args_list)
 
     @pytest.mark.asyncio
     async def test_preserves_conflicting_manual_uplink_connectors_without_creating_orphan(self) -> None:

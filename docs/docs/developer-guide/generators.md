@@ -306,10 +306,10 @@ Inter-switch cabling follows the same preservation rule. Pod and rack generators
 create spine-to-super-spine, leaf-to-spine, and l2leaf-to-leaf links with
 `role=uplink`, `medium=mmf`, and device-pair names such as
 `Uplink leaf-a__spine-a`. Parallel links receive stable numeric suffixes in
-natural interface order. On the first run after upgrading, an attached legacy
-interface-based generated link is renamed and updated in place; manual or
-conflicting connectors are not reassigned. Server cabling remains separate and
-keeps interface-based copper links with no link role.
+natural interface order. Only links already using the current generated name
+are reconciled; manual or conflicting connectors are not reassigned. Server
+cabling remains separate and keeps interface-based copper links with no link
+role.
 
 ## Running generators
 

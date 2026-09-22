@@ -109,7 +109,7 @@ Adding a new device design for a supported role is data, not a schema change. De
 A cabled connection between interfaces. Inherits `Dcim.Connector`, so it has `name` and `medium` (`mmf`, `smf`, `copper`) and relates to `connected_endpoints` → `DcimEndpoint`.
 
 - **Roles**: generated inter-switch links use `role=uplink`; DCI connections use `role=dci` rather than a separate schema node. Server links keep an unset role.
-- **Generated uplinks**: named `Uplink <lower-device>__<upper-device>` and use `medium=mmf`. Parallel links add a stable, naturally ordered numeric suffix (`... 1`, `... 2`). The generator migrates its legacy interface-based link names in place and preserves manual connector conflicts.
+- **Generated uplinks**: named `Uplink <lower-device>__<upper-device>` and use `medium=mmf`. Parallel links add a stable, naturally ordered numeric suffix (`... 1`, `... 2`). Existing manual or conflicting connectors are preserved rather than reassigned.
 - **Generated server links**: retain interface-based names and `medium=copper`.
 - **DCI attributes**: `role` (`dci`) and `include_in_underlay_protocol` (Boolean, default `true`). BGP ASNs are taken from each endpoint device's own `asn`, not stored on the link.
 - **Relationships**: inherited `connected_endpoints`; no DCI-specific endpoint, pool, subnet, endpoint IP, speed, BFD, MTU, external-network, or EVPN Gateway fields are added.
