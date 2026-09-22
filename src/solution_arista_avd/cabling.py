@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-from sys import maxsize
 from typing import TYPE_CHECKING
 
 from .protocols import DcimDevice, DcimInterface, InterfacePhysical
@@ -115,17 +114,28 @@ def _sorted_device_items(
 
     Infrahub does not guarantee GraphQL edge order. Cabling plans therefore
     cannot use dictionary insertion order to decide which devices are paired.
-    Prefer the explicit device index, then a naturally sorted hostname, with
-    the immutable node ID as the final tie-breaker.
+    Prefer the explicit device index when it is available for every device in
+    the map, then a naturally sorted hostname, with the immutable node ID as
+    the final tie-breaker. Relationship peers can be only partially hydrated;
+    mixing indexed and non-indexed keys would otherwise make hydration state
+    influence the topology order.
     """
-    return sorted(interface_map.items(), key=lambda item: _device_order_key(item[0]))
+    items = list(interface_map.items())
+    indexes = [_device_index(device) for device, _interfaces in items]
+    if all(index is not None for index in indexes):
+        return sorted(items, key=lambda item: _device_order_key(item[0], include_index=True))
+    return sorted(items, key=lambda item: _device_order_key(item[0], include_index=False))
 
 
-def _device_order_key(device: DcimDevice) -> tuple[int, tuple[tuple[int, str | int], ...], str]:
-    index = _positive_int(getattr(getattr(device, "index", None), "value", None))
+def _device_order_key(device: DcimDevice, *, include_index: bool) -> tuple[int, tuple[tuple[int, str | int], ...], str]:
+    index = _device_index(device) if include_index else None
     name = _device_text_value(device, "name") or _device_text_value(device, "display_label")
     device_id = getattr(device, "id", "")
-    return index if index is not None else maxsize, _natural_sort_key(name), str(device_id)
+    return index or 0, _natural_sort_key(name), str(device_id)
+
+
+def _device_index(device: DcimDevice) -> int | None:
+    return _positive_int(getattr(getattr(device, "index", None), "value", None))
 
 
 def _positive_int(value: object) -> int | None:

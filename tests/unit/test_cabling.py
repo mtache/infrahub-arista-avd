@@ -129,6 +129,39 @@ class TestBuildPodCablingPlan:
 
         assert reordered == expected
 
+    def test_partial_device_index_hydration_does_not_change_plan(self) -> None:
+        spine1_indexed = _device(index=1, name="spine-1", device_id="spine-1")
+        spine2_unindexed = _device(name="spine-2", device_id="spine-2")
+        spine1_unindexed = _device(name="spine-1", device_id="spine-1")
+        spine2_indexed = _device(index=2, name="spine-2", device_id="spine-2")
+        super_spine1 = _device(name="super-spine-1", device_id="super-spine-1")
+        super_spine2 = _device(name="super-spine-2", device_id="super-spine-2")
+        spine1_interfaces = [_iface("sp1-i0"), _iface("sp1-i1")]
+        spine2_interfaces = [_iface("sp2-i0"), _iface("sp2-i1")]
+        super_spine1_interfaces = [_iface(f"ss1-{index}") for index in range(4)]
+        super_spine2_interfaces = [_iface(f"ss2-{index}") for index in range(4)]
+        destination_map = {
+            super_spine1: super_spine1_interfaces,
+            super_spine2: super_spine2_interfaces,
+        }
+
+        first = _ids(
+            build_pod_cabling_plan(
+                pod_index=2,
+                src_interface_map={spine2_unindexed: spine2_interfaces, spine1_indexed: spine1_interfaces},
+                dst_interface_map=destination_map,
+            )
+        )
+        second = _ids(
+            build_pod_cabling_plan(
+                pod_index=2,
+                src_interface_map={spine1_unindexed: spine1_interfaces, spine2_indexed: spine2_interfaces},
+                dst_interface_map=destination_map,
+            )
+        )
+
+        assert second == first
+
 
 class TestBuildRackCablingPlan:
     """leaf -> spine cabling, windowed per rack_index and indexed by leaf index."""

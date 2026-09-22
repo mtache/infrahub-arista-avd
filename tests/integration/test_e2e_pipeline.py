@@ -305,14 +305,16 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         unlinked = [d["name"] for d in l3 if not d["asn_node_id"]]
         assert not unlinked, f"L3 devices without an ASN node: {unlinked}"
 
-        # C2 / SC-004: routed MLAG domains share one ASN with both peers. Pure
-        # Layer-2 MLAG domains intentionally have no routing ASN anywhere.
+        # C2 / SC-004: routed MLAG domains share one ASN with both peers. The
+        # standalone Layer-2 fabric gives its switches individual ASNs but does
+        # not put a shared routing ASN on the spine MLAG domain.
         asn_by_device = {d["id"]: d["asn_node_id"] for d in report["devices"]}
         for dom in report["domains"]:
             dom_asn = dom["asn_node_id"]
             peer_asns = {asn_by_device.get(pid) for pid in dom["peer_ids"]}
-            if peer_asns == {None}:
-                assert dom_asn is None, f"Pure Layer-2 MLAG domain {dom['domain_id']} unexpectedly has an ASN node"
+            fabric = report["fabrics"].get(dom["fabric_id"], {})
+            if fabric.get("underlay_routing_protocol") == "none":
+                assert dom_asn is None, f"Layer-2 MLAG domain {dom['domain_id']} unexpectedly has a shared ASN node"
                 continue
             assert dom_asn, f"Routed MLAG domain {dom['domain_id']} has no ASN node"
             assert peer_asns == {dom_asn}, (
@@ -710,7 +712,7 @@ async def _asn_report(client: InfrahubClient, branch: str) -> dict:
         asns: [{id, value, fabric_id}] — the allocated ASN nodes.
         devices: [{id, name, role, pod_id, fabric_id, asn_node_id}] — each device's linked ASN node id (or None).
         fabrics: {id: {underlay_routing_protocol}} — fabrics keyed by id.
-        domains: [{domain_id, asn_node_id, peer_ids}] — MLAG domains and their peers.
+        domains: [{domain_id, fabric_id, asn_node_id, peer_ids}] — MLAG domains and their peers.
     """
     query = """
     query AsnReport {
@@ -718,7 +720,16 @@ async def _asn_report(client: InfrahubClient, branch: str) -> dict:
       NetworkFabric { edges { node { id underlay_routing_protocol { value } } } }
       NetworkPod { edges { node { id parent { node { __typename id } } } } }
       DcimDevice { edges { node { id name { value } role { value } pod { node { id } } asn { node { id } } } } }
-      MlagDomain { edges { node { domain_id { value } asn { node { id } } peers { edges { node { id } } } } } }
+      MlagDomain {
+        edges {
+          node {
+            domain_id { value }
+            pod { node { id } }
+            asn { node { id } }
+            peers { edges { node { id } } }
+          }
+        }
+      }
     }
     """
     resp = await client.execute_graphql(query=query, branch_name=branch)
@@ -763,10 +774,12 @@ async def _asn_report(client: InfrahubClient, branch: str) -> dict:
     for edge in resp["MlagDomain"]["edges"]:
         node = edge["node"]
         asn_node = (node.get("asn") or {}).get("node")
+        pod_id = ((node.get("pod") or {}).get("node") or {}).get("id")
         peer_ids = [p["node"]["id"] for p in node.get("peers", {}).get("edges", []) if p.get("node")]
         domains.append(
             {
                 "domain_id": node["domain_id"]["value"],
+                "fabric_id": pod_fabric_ids.get(pod_id),
                 "asn_node_id": (asn_node or {}).get("id"),
                 "peer_ids": peer_ids,
             }
