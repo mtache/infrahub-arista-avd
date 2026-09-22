@@ -1,6 +1,7 @@
 """Unit tests for the AVD ANTA catalog transform."""
 
 import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -71,6 +72,17 @@ def _data(
             }
         ]
     return {
+        "anta_fabrics": {
+            "edges": [
+                {
+                    "node": {
+                        "id": FABRIC_ID,
+                        "anta_enabled": {"value": anta_enabled},
+                        "avd_catalogs_filters": {"value": avd_catalogs_filters},
+                    }
+                }
+            ]
+        },
         "target": {"edges": target_edges},
         "DcimDevice": {"edges": [{"node": _device("leaf1", "dev-target", with_sc=target_has_sc)}]},
     }
@@ -156,6 +168,16 @@ async def test_enabled_excludes_tests_from_real_pyavd_catalog() -> None:
     filtered_test_names = _catalog_test_names(filtered)
     assert filtered_test_names
     assert excluded_tests.isdisjoint(filtered_test_names)
+
+
+def test_query_exposes_fabric_settings_for_proposed_change_impact_tracking() -> None:
+    query = (Path(__file__).parents[2] / "transforms" / "avd_anta_catalog.gql").read_text()
+
+    direct_fabric_query = query.split("anta_fabrics: NetworkFabric", maxsplit=1)[1].split(
+        "target: DcimDevice", maxsplit=1
+    )[0]
+    assert "anta_enabled" in direct_fabric_query
+    assert "avd_catalogs_filters" in direct_fabric_query
 
 
 if __name__ == "__main__":

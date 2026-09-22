@@ -34,9 +34,12 @@ Before deployment:
 1. Enable `anta_enabled` on the target `NetworkFabric`.
 2. Optionally populate `avd_catalogs_filters` with ANTA test names to exclude from every generated
    catalog for that fabric.
-3. Run the generator chain on a working branch.
-4. Confirm every target device has a populated **AVD EOS Configuration** and **AVD ANTA Catalog**.
-5. Review the proposed change and merge it into `main`.
+3. For a new fabric, run the generator chain on a working branch. For an already generated fabric
+   whose structured configs are current, no generator rerun is required.
+4. Open a proposed change. A change to `anta_enabled` or `avd_catalogs_filters` automatically
+   refreshes the **AVD ANTA Catalog** for the generated devices.
+5. Confirm every target device has a populated **AVD EOS Configuration** and **AVD ANTA Catalog**.
+6. Review the proposed change and merge it into `main`.
 
 `anta_enabled` controls Infrahub artifact generation. It is distinct from the Semaphore variable
 `anta_enable`, which tells ANTA to use EOS privileged mode. When `anta_enabled` is false, the skip-test
@@ -47,6 +50,11 @@ discards, and `VerifyLoggingErrors` because cEOSLab has no physical platform ide
 lab-specific exclusions; do not copy them to physical fabrics without validating the reason.
 
 The Semaphore task intentionally reads only `main`. It cannot validate branch artifacts before merge.
+
+If a catalog contains `# No structured config for <device>`, rerun
+`generate-avd-device-structured-config` for the fabric and rerun the proposed-change pipeline. The
+per-device **Regenerate** action remains useful for a spot-check, but it is not required to enable
+ANTA across an existing generated fabric.
 
 ## 2. Deploy the merged configuration
 

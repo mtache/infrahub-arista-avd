@@ -6,8 +6,33 @@ from pydantic import BaseModel, Field
 
 
 class AvdAntaCatalogQuery(BaseModel):
+    anta_fabrics: "AvdAntaCatalogQueryAntaFabrics"
     target: "AvdAntaCatalogQueryTarget"
     dcim_device: "AvdAntaCatalogQueryDcimDevice" = Field(alias="DcimDevice")
+
+
+class AvdAntaCatalogQueryAntaFabrics(BaseModel):
+    edges: list["AvdAntaCatalogQueryAntaFabricsEdges"]
+
+
+class AvdAntaCatalogQueryAntaFabricsEdges(BaseModel):
+    node: Optional["AvdAntaCatalogQueryAntaFabricsEdgesNode"]
+
+
+class AvdAntaCatalogQueryAntaFabricsEdgesNode(BaseModel):
+    id: str
+    anta_enabled: Optional["AvdAntaCatalogQueryAntaFabricsEdgesNodeAntaEnabled"]
+    avd_catalogs_filters: Optional[
+        "AvdAntaCatalogQueryAntaFabricsEdgesNodeAvdCatalogsFilters"
+    ]
+
+
+class AvdAntaCatalogQueryAntaFabricsEdgesNodeAntaEnabled(BaseModel):
+    value: Optional[bool]
+
+
+class AvdAntaCatalogQueryAntaFabricsEdgesNodeAvdCatalogsFilters(BaseModel):
+    value: Optional[Any]
 
 
 class AvdAntaCatalogQueryTarget(BaseModel):
@@ -153,6 +178,9 @@ class AvdAntaCatalogQueryDcimDeviceEdgesNodeAvdArtifactNodeStructuredConfigFileN
 
 
 AvdAntaCatalogQuery.model_rebuild()
+AvdAntaCatalogQueryAntaFabrics.model_rebuild()
+AvdAntaCatalogQueryAntaFabricsEdges.model_rebuild()
+AvdAntaCatalogQueryAntaFabricsEdgesNode.model_rebuild()
 AvdAntaCatalogQueryTarget.model_rebuild()
 AvdAntaCatalogQueryTargetEdges.model_rebuild()
 AvdAntaCatalogQueryTargetEdgesNode.model_rebuild()

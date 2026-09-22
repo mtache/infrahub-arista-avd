@@ -80,6 +80,7 @@ DCI_LINK_NAME = "e2e-dci-link"
 DCI_INTERFACE_NAME = "Ethernet999"
 FILTERED_ANTA_FABRIC = "Fabric-L3LS-Multi-Domain"
 FILTERED_ANTA_TESTS = ("VerifyInterfaceDiscards", "VerifyLoggingErrors")
+PROPOSED_CHANGE_ANTA_FABRIC = "Fabric-L3LS-MultiPod-A"
 
 
 @pytest.mark.e2e
@@ -614,6 +615,81 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         # Interface names must be ContainerLab short form, never raw EOS names.
         untranslated = [ep for link in links for ep in link["endpoints"] if "Ethernet" in ep]
         assert not untranslated, f"untranslated EOS interface names in links: {untranslated[:5]}"
+
+    # --- Component 14: proposed-change ANTA refresh -----------------------
+    @pytest.mark.asyncio(loop_scope="class")
+    async def test_proposed_change_refreshes_anta_catalogs_for_fabric_flag(self, client: InfrahubClient) -> None:
+        """Enabling ANTA on a generated fabric refreshes its device catalogs in the proposed change."""
+        fabric = await client.get(
+            kind="NetworkFabric",
+            name__value=PROPOSED_CHANGE_ANTA_FABRIC,
+            branch=PIPELINE_BRANCH,
+        )
+        device_ids_by_name = await _fabric_device_ids_by_name(
+            client,
+            PIPELINE_BRANCH,
+            PROPOSED_CHANGE_ANTA_FABRIC,
+        )
+        assert device_ids_by_name, f"{PROPOSED_CHANGE_ANTA_FABRIC} has no generated devices"
+
+        definition = await client.get(
+            kind="CoreArtifactDefinition",
+            name__value="avd_anta_catalog",
+            branch=PIPELINE_BRANCH,
+        )
+
+        # Establish disabled-marker catalogs before the proposed change. This
+        # makes the subsequent marker -> populated transition prove that the
+        # proposed-change artifact validator actually re-rendered the devices.
+        fabric.anta_enabled.value = False
+        await fabric.save()
+        response = await client._post(
+            f"{client.address}/api/artifact/generate/{definition.id}?branch={PIPELINE_BRANCH}",
+            payload={"nodes": list(device_ids_by_name.values())},
+        )
+        response.raise_for_status()
+        await wait_until(
+            fetch=lambda: _fetch_ready_artifact_contents_by_target(
+                client,
+                PIPELINE_BRANCH,
+                ARTIFACT_AVD_ANTA_CATALOG,
+            ),
+            ready=lambda contents: all(
+                ANTA_DISABLED_MARKER in contents.get(device_name, "") for device_name in device_ids_by_name
+            ),
+            timeout=ARTIFACT_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe=f"disabled ANTA marker catalogs for {PROPOSED_CHANGE_ANTA_FABRIC}",
+        )
+
+        fabric.anta_enabled.value = True
+        await fabric.save()
+        proposed_change = await client.create(
+            kind="CoreProposedChange",
+            data={
+                "source_branch": PIPELINE_BRANCH,
+                "destination_branch": "main",
+                "name": "e2e-enable-anta",
+            },
+        )
+        await proposed_change.save()
+
+        refreshed = await wait_until(
+            fetch=lambda: _fetch_ready_artifact_contents_by_target(
+                client,
+                PIPELINE_BRANCH,
+                ARTIFACT_AVD_ANTA_CATALOG,
+            ),
+            ready=lambda contents: all(
+                "anta.tests." in contents.get(device_name, "")
+                and ANTA_DISABLED_MARKER not in contents.get(device_name, "")
+                for device_name in device_ids_by_name
+            ),
+            timeout=ARTIFACT_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe=f"proposed-change ANTA catalogs for {PROPOSED_CHANGE_ANTA_FABRIC}",
+        )
+        assert set(device_ids_by_name) <= set(refreshed)
 
     # --- Fabric-scoped deployment validation (US4 / `--fabric` selector) ----
     @pytest.mark.asyncio(loop_scope="class")
@@ -1644,6 +1720,78 @@ async def _fetch_ready_artifact_contents(client: InfrahubClient, branch: str, ar
         if storage_id:
             contents.append(await client.object_store.get(identifier=storage_id))
     return contents
+
+
+async def _fetch_ready_artifact_contents_by_target(
+    client: InfrahubClient,
+    branch: str,
+    artifact_name: str,
+) -> dict[str, str]:
+    """Return Ready artifact contents keyed by target display label."""
+    query = (
+        "query {\n"
+        f'  CoreArtifact(name__value: "{artifact_name}") {{\n'
+        "    edges { node {\n"
+        "      status { value }\n"
+        "      storage_id { value }\n"
+        "      object { node { display_label } }\n"
+        "    } }\n"
+        "  }\n"
+        "}"
+    )
+    response = await client.execute_graphql(query=query, branch_name=branch)
+    contents: dict[str, str] = {}
+    for edge in response["CoreArtifact"]["edges"]:
+        node = edge["node"]
+        if node.get("status", {}).get("value") != "Ready":
+            continue
+        storage_id = node.get("storage_id", {}).get("value")
+        target = (node.get("object") or {}).get("node") or {}
+        target_name = target.get("display_label")
+        if storage_id and target_name:
+            contents[target_name] = await client.object_store.get(identifier=storage_id)
+    return contents
+
+
+async def _fabric_device_ids_by_name(
+    client: InfrahubClient,
+    branch: str,
+    fabric_name: str,
+) -> dict[str, str]:
+    """Return device IDs keyed by name for one fabric."""
+    query = """
+    query {
+      DcimDevice {
+        edges {
+          node {
+            id
+            name { value }
+            pod {
+              node {
+                parent {
+                  node {
+                    __typename
+                    id
+                    ... on NetworkFabric { name { value } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    response = await client.execute_graphql(query=query, branch_name=branch)
+    devices: dict[str, str] = {}
+    for edge in response["DcimDevice"]["edges"]:
+        node = edge["node"]
+        parent = (((node.get("pod") or {}).get("node") or {}).get("parent") or {}).get("node") or {}
+        if parent.get("__typename") != "NetworkFabric":
+            continue
+        if (parent.get("name") or {}).get("value") == fabric_name:
+            devices[node["name"]["value"]] = node["id"]
+    return devices
 
 
 async def _fetch_ready_artifact_content(
