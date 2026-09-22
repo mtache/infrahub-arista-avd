@@ -451,15 +451,14 @@ class TestE2EPipeline(TestInfrahubDockerClient):
     @pytest.mark.asyncio(loop_scope="class")
     async def test_hostvar_generator_two_runs_are_idempotent(self, client: InfrahubClient) -> None:
         """Two explicit hostvar runs produce identical normalized files and checksums."""
-        devices = await client.all(kind="DcimDevice", branch=PIPELINE_BRANCH)
-        device_ids = [device.id for device in devices]
+        device_ids = await _device_ids_for_fabric(client, PIPELINE_BRANCH, FILTERED_ANTA_FABRIC)
         assert device_ids, "no devices found for hostvar idempotence validation"
 
         snapshots = []
         for pass_number in (1, 2):
             await _run_generator_for_nodes(client, PIPELINE_BRANCH, GENERATOR_AVD_HOSTVAR, device_ids)
             report = await wait_until(
-                fetch=lambda: _hostvar_snapshot(client, PIPELINE_BRANCH),
+                fetch=lambda: _hostvar_snapshot(client, PIPELINE_BRANCH, device_ids),
                 ready=itemgetter("ready"),
                 timeout=GENERATOR_TIMEOUT,
                 interval=POLL_INTERVAL,
@@ -1117,11 +1116,35 @@ async def _devices_without_structured_config(client: InfrahubClient, branch: str
     return {"total": len(edges), "without": without}
 
 
-async def _hostvar_snapshot(client: InfrahubClient, branch: str) -> dict:
+async def _device_ids_for_fabric(client: InfrahubClient, branch: str, fabric_name: str) -> list[str]:
+    """Return generated device IDs belonging to one named fabric."""
+    query = """
+    query DeviceFabricMembership {
+      DcimDevice {
+        edges {
+          node {
+            id
+            pod { node { parent { node { ... on NetworkFabric { name { value } } } } } }
+          }
+        }
+      }
+    }
+    """
+    response = await client.execute_graphql(query=query, branch_name=branch)
+    device_ids = []
+    for edge in response["DcimDevice"]["edges"]:
+        node = edge["node"]
+        parent = (((node.get("pod") or {}).get("node") or {}).get("parent") or {}).get("node") or {}
+        if (parent.get("name") or {}).get("value") == fabric_name:
+            device_ids.append(node["id"])
+    return sorted(device_ids)
+
+
+async def _hostvar_snapshot(client: InfrahubClient, branch: str, device_ids: list[str]) -> dict:
     """Return normalized hostvar content once all explicit hostvar runs settle."""
     query = """
-    query HostvarSnapshot {
-      DcimDevice {
+    query HostvarSnapshot($device_ids: [ID]) {
+      DcimDevice(ids: $device_ids) {
         edges {
           node {
             name { value }
@@ -1143,18 +1166,24 @@ async def _hostvar_snapshot(client: InfrahubClient, branch: str) -> dict:
         edges {
           node {
             status { value }
+            object { node { id } }
             definition { node { ... on CoreGeneratorDefinition { name { value } } } }
           }
         }
       }
     }
     """
-    resp = await client.execute_graphql(query=query, branch_name=branch)
+    resp = await client.execute_graphql(
+        query=query,
+        variables={"device_ids": device_ids},
+        branch_name=branch,
+    )
     hostvar_instances = []
     for edge in resp["CoreGeneratorInstance"]["edges"]:
         node = edge["node"]
         definition = (node.get("definition") or {}).get("node") or {}
-        if (definition.get("name") or {}).get("value") == GENERATOR_AVD_HOSTVAR:
+        target_id = ((node.get("object") or {}).get("node") or {}).get("id")
+        if (definition.get("name") or {}).get("value") == GENERATOR_AVD_HOSTVAR and target_id in device_ids:
             hostvar_instances.append((node.get("status") or {}).get("value") or "")
 
     files = []
@@ -1176,11 +1205,10 @@ async def _hostvar_snapshot(client: InfrahubClient, branch: str) -> dict:
             }
         )
 
-    device_count = len(resp["DcimDevice"]["edges"])
     active_statuses = {"pending", "running", "scheduled", "in_progress", "queued"}
     return {
         "ready": (
-            len(files) == device_count > 0
+            len(files) == len(device_ids) > 0
             and not any(status.lower() in active_statuses for status in hostvar_instances)
             and not any(status == "Error" for status in hostvar_instances)
         ),
