@@ -489,6 +489,7 @@ query FabricPoolCheckQuery($name: String!) {
                         node {
                           parent {
                             node {
+                              __typename
                               id
                             }
                           }
