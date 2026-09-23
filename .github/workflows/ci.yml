@@ -234,6 +234,7 @@ jobs:
           INFRAHUB_TESTING_DOCKER_PULL: "false"
           INFRAHUB_TESTING_WEB_CONCURRENCY: "2"
           INFRAHUB_TESTING_API_SERVER_COUNT: "1"
+          INFRAHUB_TESTING_TASKMGR_BACKGROUND_SVC_REPLICAS: "1"
           # Generators issue large GraphQL reads; raise the client timeout above
           # the 60s default so a busy server does not trip a false failure.
           INFRAHUB_TIMEOUT: "300"
