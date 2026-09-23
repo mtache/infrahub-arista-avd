@@ -147,6 +147,7 @@ def _make_generator() -> RackGenerator:
     gen.rack_amount_of_leafs = 2
     gen.rack_mlag = True
     gen.rack_mlag_enabled = True
+    gen.underlay_routing_protocol = "ebgp"
     gen.rack_index = 1
     gen.rack_id = "rack-1"
     gen.rack_leaf_switch_template = "leaf-template"
@@ -388,6 +389,27 @@ async def test_create_mlag_pairs_allocates_shared_asn_node() -> None:
     assert gen.client.execute_graphql.await_count == 2
     linked_asn_ids = {call.kwargs["variables"]["asn_id"] for call in gen.client.execute_graphql.await_args_list}
     assert linked_asn_ids == {"asn-node-1"}
+
+
+@pytest.mark.asyncio
+async def test_create_l2_mlag_pair_omits_routing_asn() -> None:
+    gen = _make_generator()
+    gen.underlay_routing_protocol = "none"
+    gen.allocate_routing_asn = AsyncMock()  # type: ignore[method-assign]
+    mlag_domain = MagicMock()
+    mlag_domain.save = AsyncMock()
+    gen.client.create.return_value = mlag_domain
+
+    await gen.create_mlag_pairs()
+
+    gen.allocate_routing_asn.assert_not_awaited()
+    gen.client.create.assert_awaited_once_with(
+        "MlagDomain",
+        domain_id="DC1_BORDER",
+        peers=[{"id": "leaf-a"}, {"id": "leaf-b"}],
+        pod={"id": "pod-1"},
+    )
+    gen.client.execute_graphql.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -20,10 +20,12 @@ from solution_arista_avd.cabling import (
 )
 
 
-def _iface(iface_id: str) -> MagicMock:
+def _iface(iface_id: str, *, device_label: str = "", device_id: str = "") -> MagicMock:
     """A mock interface identified by .id (all the builders read off it)."""
     iface = MagicMock()
     iface.id = iface_id
+    iface.device.display_label = device_label
+    iface.device.id = device_id
     return iface
 
 
@@ -255,6 +257,81 @@ class TestBuildRackCablingPlan:
 
         assert reordered == expected
 
+    def test_partial_device_index_hydration_uses_whole_map_fallback(self) -> None:
+        leaf1_indexed = _device(index=2, name="leaf-1", device_id="leaf-1")
+        leaf2_unindexed = _device(name="leaf-2", device_id="leaf-2")
+        leaf1_unindexed = _device(name="leaf-1", device_id="leaf-1")
+        leaf2_indexed = _device(index=1, name="leaf-2", device_id="leaf-2")
+        spine1 = _device(name="spine-1", device_id="spine-1")
+        spine2 = _device(name="spine-2", device_id="spine-2")
+        leaf1_interfaces = [_iface("l1-i0"), _iface("l1-i1")]
+        leaf2_interfaces = [_iface("l2-i0"), _iface("l2-i1")]
+        destination_map = {
+            spine1: [_iface("sp1-0"), _iface("sp1-1")],
+            spine2: [_iface("sp2-0"), _iface("sp2-1")],
+        }
+
+        first = _ids(
+            build_rack_cabling_plan(
+                rack_index=1,
+                src_interface_map={leaf2_unindexed: leaf2_interfaces, leaf1_indexed: leaf1_interfaces},
+                dst_interface_map=destination_map,
+            )
+        )
+        second = _ids(
+            build_rack_cabling_plan(
+                rack_index=1,
+                src_interface_map={leaf1_unindexed: leaf1_interfaces, leaf2_indexed: leaf2_interfaces},
+                dst_interface_map=destination_map,
+            )
+        )
+
+        assert (
+            first
+            == second
+            == [
+                ("l1-i0", "sp1-0"),
+                ("l1-i1", "sp2-0"),
+                ("l2-i0", "sp1-1"),
+                ("l2-i1", "sp2-1"),
+            ]
+        )
+
+    def test_interface_relationship_identity_stabilizes_unhydrated_device_keys(self) -> None:
+        first_leaf = _device()
+        second_leaf = _device()
+        first_spine = _device()
+        second_spine = _device()
+        leaf1_interfaces = [
+            _iface("l1-i0", device_label="leaf-1", device_id="leaf-1"),
+            _iface("l1-i1", device_label="leaf-1", device_id="leaf-1"),
+        ]
+        leaf2_interfaces = [
+            _iface("l2-i0", device_label="leaf-2", device_id="leaf-2"),
+            _iface("l2-i1", device_label="leaf-2", device_id="leaf-2"),
+        ]
+        spine1_interfaces = [
+            _iface("sp1-0", device_label="spine-1", device_id="spine-1"),
+            _iface("sp1-1", device_label="spine-1", device_id="spine-1"),
+        ]
+        spine2_interfaces = [
+            _iface("sp2-0", device_label="spine-2", device_id="spine-2"),
+            _iface("sp2-1", device_label="spine-2", device_id="spine-2"),
+        ]
+
+        plan = build_rack_cabling_plan(
+            rack_index=1,
+            src_interface_map={second_leaf: leaf2_interfaces, first_leaf: leaf1_interfaces},
+            dst_interface_map={second_spine: spine2_interfaces, first_spine: spine1_interfaces},
+        )
+
+        assert _ids(plan) == [
+            ("l1-i0", "sp1-0"),
+            ("l1-i1", "sp2-0"),
+            ("l2-i0", "sp1-1"),
+            ("l2-i1", "sp2-1"),
+        ]
+
 
 class TestBuildServerCablingPlan:
     def test_device_map_insertion_order_does_not_change_plan(self) -> None:
@@ -283,6 +360,34 @@ class TestBuildServerCablingPlan:
         )
 
         assert reordered == expected
+
+    def test_partial_device_index_hydration_does_not_change_plan(self) -> None:
+        server1_indexed = _device(index=2, name="server-1", device_id="server-1")
+        server2_unindexed = _device(name="server-2", device_id="server-2")
+        server1_unindexed = _device(name="server-1", device_id="server-1")
+        server2_indexed = _device(index=1, name="server-2", device_id="server-2")
+        leaf1 = _device(name="leaf-1", device_id="leaf-1")
+        leaf2 = _device(name="leaf-2", device_id="leaf-2")
+        server1_interfaces = [_iface("server1-i0"), _iface("server1-i1")]
+        server2_interfaces = [_iface("server2-i0"), _iface("server2-i1")]
+        destination_map = {leaf1: [_iface("leaf1-i0")], leaf2: [_iface("leaf2-i0")]}
+
+        first = _ids(
+            build_server_cabling_plan(
+                server_index=0,
+                src_interface_map={server2_unindexed: server2_interfaces, server1_indexed: server1_interfaces},
+                dst_interface_map=destination_map,
+            )
+        )
+        second = _ids(
+            build_server_cabling_plan(
+                server_index=0,
+                src_interface_map={server1_unindexed: server1_interfaces, server2_indexed: server2_interfaces},
+                dst_interface_map=destination_map,
+            )
+        )
+
+        assert first == second
 
 
 def _physical_interface(

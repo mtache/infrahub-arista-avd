@@ -97,6 +97,7 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
     # switches them to l2spine/l2leaf for standalone L2LS fabrics (underlay "none").
     leaf_role: str = "leaf"
     spine_role: str = "spine"
+    underlay_routing_protocol: str | None = None
 
     loopback_pool: CoreIPAddressPool | None
 
@@ -172,6 +173,7 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
         # fabric underlay so L3LS fabrics (ebgp/ospf) keep the routed leaf role.
         # Read from the query data (no extra fetch), mirroring the pod generator.
         underlay = getattr(getattr(fabric_node, "underlay_routing_protocol", None), "value", None)
+        self.underlay_routing_protocol = underlay
         self.leaf_role = LEAF_ROLE_BY_UNDERLAY.get(underlay, "leaf")
         self.spine_role = SPINE_ROLE_BY_UNDERLAY.get(underlay, "spine")
 
@@ -368,16 +370,19 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
 
         For every pair of consecutive leafs (0+1, 2+3, ...):
         - Create an MlagDomain with both leafs as peers.
-        - Allocate a single shared ``Routing.Asn`` from the fabric ASN pool and
-          link it to both leaf devices and the domain via the ``asn``
-          relationship, so the pair presents one BGP ASN (FR-004).
+        - For routed fabrics, allocate a single shared ``Routing.Asn`` from the
+          fabric ASN pool and link it to both leaf devices and the domain via
+          the ``asn`` relationship, so the pair presents one BGP ASN (FR-004).
+        - For standalone Layer-2 fabrics, leave the domain and peers unlinked
+          from routing ASNs.
         AVD auto-generates the switch-side Port-Channel from mlag_interfaces in hostvars.
         """
         if not self.rack_mlag_enabled:
             self.logger.info(f"Rack {self.rack_name}: MLAG disabled or fewer than 2 leafs, skipping MLAG pair creation")
             return
 
-        if self.asn_pool is None:
+        routed_mlag = self.underlay_routing_protocol != "none"
+        if routed_mlag and self.asn_pool is None:
             msg = f"Rack {self.rack_name}: MLAG is enabled but the parent fabric has no ASN pool"
             raise ValueError(msg)
 
@@ -390,14 +395,15 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
 
             self.logger.info(f"Creating MLAG pair {domain_id}: {leaf_a.name.value} + {leaf_b.name.value}")
 
-            routing_asn_id = await self._get_or_allocate_mlag_asn(domain_id)
-
-            domain_kwargs = {
+            domain_kwargs: dict[str, object] = {
                 "domain_id": domain_id,
-                "asn": {"id": routing_asn_id},
                 "peers": [{"id": leaf_a.id}, {"id": leaf_b.id}],
                 "pod": {"id": self.pod_id},
             }
+            routing_asn_id = None
+            if routed_mlag:
+                routing_asn_id = await self._get_or_allocate_mlag_asn(domain_id)
+                domain_kwargs["asn"] = {"id": routing_asn_id}
 
             mlag_domain = await self.client.create(
                 "MlagDomain",
@@ -405,9 +411,11 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
             )
             await mlag_domain.save(allow_upsert=True)
 
-            # Both leaves share the domain's single ASN node.
-            await set_device_asn(self.client, leaf_a.id, routing_asn_id)
-            await set_device_asn(self.client, leaf_b.id, routing_asn_id)
+            # Routed MLAG peers share the domain's ASN. Standalone Layer-2
+            # fabrics have no routing ASN on either the domain or its peers.
+            if routing_asn_id:
+                await set_device_asn(self.client, leaf_a.id, routing_asn_id)
+                await set_device_asn(self.client, leaf_b.id, routing_asn_id)
 
             # Standalone-L2LS / campus main-tier l2leaf switches use a model with
             # no dedicated mlag_peer interfaces, so carve the peer-link from the
@@ -416,7 +424,10 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
                 await self._assign_l2leaf_mlag_peer_interfaces(leaf_a)
                 await self._assign_l2leaf_mlag_peer_interfaces(leaf_b)
 
-            self.logger.info(f"MLAG domain {domain_id} created successfully with shared ASN node {routing_asn_id}")
+            if routing_asn_id:
+                self.logger.info(f"MLAG domain {domain_id} created successfully with shared ASN node {routing_asn_id}")
+            else:
+                self.logger.info(f"Layer-2 MLAG domain {domain_id} created successfully without a routing ASN")
 
     async def _assign_l2leaf_mlag_peer_interfaces(self, leaf: DcimDevice) -> None:
         """Carve the MLAG peer-link on an l2leaf main-tier switch.

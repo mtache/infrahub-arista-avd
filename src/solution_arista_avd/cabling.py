@@ -51,9 +51,14 @@ def build_rack_cabling_plan(
     dst_device_count = len(dst_devices)
     start = (rack_index * 2) - 2
     end = start + 2
+    use_explicit_src_indexes = all(_device_index(device) is not None for device, _interfaces in src_items)
 
     for fallback_index, (src_device, src_interfaces) in enumerate(src_items, start=1):
-        src_device_index = _rack_source_device_index(src_device, fallback=fallback_index)
+        src_device_index = _rack_source_device_index(
+            src_device,
+            fallback=fallback_index,
+            use_explicit_index=use_explicit_src_indexes,
+        )
 
         for dst_index, src_interface in enumerate(src_interfaces[:dst_device_count]):
             dst_interface = dst_interface_map[dst_devices[dst_index]][start:end][src_device_index - 1]
@@ -62,21 +67,9 @@ def build_rack_cabling_plan(
     return cabling_plan
 
 
-def _rack_source_device_index(device: DcimDevice, *, fallback: int) -> int:
-    value = getattr(getattr(device, "index", None), "value", None)
-    if isinstance(value, int) and value > 0:
-        return value
-    if isinstance(value, str) and value.isdecimal() and int(value) > 0:
-        return int(value)
-
-    for name_attr in ("name", "display_label"):
-        candidate = getattr(device, name_attr, None)
-        name = getattr(candidate, "value", candidate)
-        if isinstance(name, str):
-            suffix = name.rsplit("-", maxsplit=1)[-1]
-            if suffix.isdecimal() and int(suffix) > 0:
-                return int(suffix)
-
+def _rack_source_device_index(device: DcimDevice, *, fallback: int, use_explicit_index: bool) -> int:
+    if use_explicit_index and (index := _device_index(device)) is not None:
+        return index
     return fallback
 
 
@@ -123,15 +116,25 @@ def _sorted_device_items(
     items = list(interface_map.items())
     indexes = [_device_index(device) for device, _interfaces in items]
     if all(index is not None for index in indexes):
-        return sorted(items, key=lambda item: _device_order_key(item[0], include_index=True))
-    return sorted(items, key=lambda item: _device_order_key(item[0], include_index=False))
+        return sorted(items, key=lambda item: _device_order_key(*item, include_index=True))
+    return sorted(items, key=lambda item: _device_order_key(*item, include_index=False))
 
 
-def _device_order_key(device: DcimDevice, *, include_index: bool) -> tuple[int, tuple[tuple[int, str | int], ...], str]:
+def _device_order_key(
+    device: DcimDevice,
+    interfaces: list[DcimInterface],
+    *,
+    include_index: bool,
+) -> tuple[int, tuple[tuple[int, str | int], ...], str]:
     index = _device_index(device) if include_index else None
-    name = _device_text_value(device, "name") or _device_text_value(device, "display_label")
-    device_id = getattr(device, "id", "")
-    return index or 0, _natural_sort_key(name), str(device_id)
+    relationship = getattr(interfaces[0], "device", None) if interfaces else None
+    name = (
+        _device_text_value(device, "name")
+        or _device_text_value(device, "display_label")
+        or _relationship_text_value(relationship, "display_label")
+    )
+    device_id = _string_value(getattr(device, "id", None)) or _relationship_text_value(relationship, "id")
+    return index or 0, _natural_sort_key(name), device_id
 
 
 def _device_index(device: DcimDevice) -> int | None:
@@ -149,6 +152,15 @@ def _positive_int(value: object) -> int | None:
 def _device_text_value(device: DcimDevice, attribute_name: str) -> str:
     attribute = getattr(device, attribute_name, None)
     value = getattr(attribute, "value", attribute)
+    return value if isinstance(value, str) else ""
+
+
+def _relationship_text_value(relationship: object, attribute_name: str) -> str:
+    value = getattr(relationship, attribute_name, None)
+    return _string_value(value)
+
+
+def _string_value(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
