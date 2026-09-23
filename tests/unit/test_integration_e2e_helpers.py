@@ -5,7 +5,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.integration.test_e2e_pipeline import _dci_leaf_candidates, _ensure_dci_pool
+from tests.integration.test_e2e_pipeline import (
+    _dci_leaf_candidates,
+    _ensure_dci_pool,
+    _mark_racks_generation_incomplete,
+    _run_generator_for_nodes,
+)
 
 
 def _dci_candidate_edge(*, fabric_id: str, fabric_name: str, device_id: str, device_name: str) -> dict:
@@ -80,3 +85,42 @@ async def test_ensure_dci_pool_reuses_existing_relationship() -> None:
         include=["dci_pool"],
     )
     client.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rack_reruns_mark_every_rack_incomplete_before_generation() -> None:
+    client = SimpleNamespace(execute_graphql=AsyncMock())
+
+    await _mark_racks_generation_incomplete(client, "test-branch", ["rack-1", "rack-2"])
+
+    assert [call.kwargs["variables"] for call in client.execute_graphql.await_args_list] == [
+        {"id": "rack-1"},
+        {"id": "rack-2"},
+    ]
+    assert all(call.kwargs["branch_name"] == "test-branch" for call in client.execute_graphql.await_args_list)
+
+
+@pytest.mark.asyncio
+async def test_generator_nodes_can_run_sequentially() -> None:
+    client = SimpleNamespace(
+        get=AsyncMock(return_value=SimpleNamespace(id="generator-definition")),
+        execute_graphql=AsyncMock(),
+    )
+
+    await _run_generator_for_nodes(
+        client,
+        "test-branch",
+        "generate-rack",
+        ["rack-1", "rack-2"],
+        sequential=True,
+    )
+
+    client.get.assert_awaited_once_with(
+        kind="CoreGeneratorDefinition",
+        name__value="generate-rack",
+        branch="test-branch",
+    )
+    assert [call.kwargs["variables"] for call in client.execute_graphql.await_args_list] == [
+        {"id": "generator-definition", "nodes": ["rack-1"]},
+        {"id": "generator-definition", "nodes": ["rack-2"]},
+    ]

@@ -478,8 +478,14 @@ class TestE2EPipeline(TestInfrahubDockerClient):
 
         snapshots = []
         for pass_number in (1, 2):
+            rack_ids = [rack_id for _, rack_id in rack_targets]
+            await _mark_racks_generation_incomplete(client, PIPELINE_BRANCH, rack_ids)
             await _run_generator_for_nodes(
-                client, PIPELINE_BRANCH, GENERATOR_RACK, [rack_id for _, rack_id in rack_targets]
+                client,
+                PIPELINE_BRANCH,
+                GENERATOR_RACK,
+                rack_ids,
+                sequential=True,
             )
             stable_snapshot = _stable_rack_rerun_snapshot(required_observations=3)
             snapshot = await wait_until(
@@ -1157,6 +1163,9 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str) -> dict:
       LocationRack {
         edges { node { id name { value } generation_complete { value } } }
       }
+      NetworkFabric {
+        edges { node { id name { value } avd_hostvars_ready { value } } }
+      }
       IpamIPAddress {
         edges {
           node {
@@ -1210,6 +1219,13 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str) -> dict:
         )
         for edge in resp["LocationRack"]["edges"]
     )
+    fabrics = sorted(
+        (
+            edge["node"]["name"]["value"],
+            bool(edge["node"]["avd_hostvars_ready"]["value"]),
+        )
+        for edge in resp["NetworkFabric"]["edges"]
+    )
     structured_config_files = _normalize_structured_config_files(resp["AvdStructuredConfigFile"]["edges"])
     structured_config_ethernet_ip_refs = await _structured_config_ethernet_ip_refs(
         client,
@@ -1218,6 +1234,7 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str) -> dict:
     state = {
         "generator_instances": generator_instances,
         "rack_generator_instances": rack_generator_instances,
+        "fabric_hostvars_ready": fabrics,
         "ipam_addresses": _normalize_ipam_addresses(resp["IpamIPAddress"]["edges"]),
         "physical_interface_ip_assignments": _normalize_physical_interface_ip_assignments(
             resp["InterfacePhysical"]["edges"]
@@ -1231,6 +1248,8 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str) -> dict:
             and not rack_errors
             and not active
             and all(complete for _, complete in racks)
+            and bool(fabrics)
+            and all(ready for _, ready in fabrics)
             and bool(structured_config_files)
         ),
         "rack_errors": rack_errors,
@@ -1453,20 +1472,44 @@ async def _ensure_dci_pool(client: InfrahubClient, branch: str, fabric_id: str) 
 
 
 async def _run_generator_for_nodes(
-    client: InfrahubClient, branch: str, generator_name: str, node_ids: list[str]
+    client: InfrahubClient,
+    branch: str,
+    generator_name: str,
+    node_ids: list[str],
+    *,
+    sequential: bool = False,
 ) -> None:
     gen_def = await client.get(kind="CoreGeneratorDefinition", name__value=generator_name, branch=branch)
-    await client.execute_graphql(
-        query="""
-        mutation RunGenerator($id: String!, $nodes: [String!]!) {
-            CoreGeneratorDefinitionRun(data: { id: $id, nodes: $nodes }) {
-                ok
+    node_batches = ([node_id] for node_id in node_ids) if sequential else (node_ids,)
+    for node_batch in node_batches:
+        await client.execute_graphql(
+            query="""
+            mutation RunGenerator($id: String!, $nodes: [String!]!) {
+                CoreGeneratorDefinitionRun(data: { id: $id, nodes: $nodes }) {
+                    ok
+                }
             }
-        }
-        """,
-        variables={"id": gen_def.id, "nodes": node_ids},
-        branch_name=branch,
-    )
+            """,
+            variables={"id": gen_def.id, "nodes": node_batch},
+            branch_name=branch,
+        )
+
+
+async def _mark_racks_generation_incomplete(client: InfrahubClient, branch: str, rack_ids: list[str]) -> None:
+    """Prevent intermediate hostvar cascades while racks are rerun sequentially."""
+    for rack_id in rack_ids:
+        await client.execute_graphql(
+            query="""
+            mutation MarkRackIncomplete($id: String!) {
+                LocationRackUpsert(data: { id: $id, generation_complete: { value: false } }) {
+                    ok
+                    object { id }
+                }
+            }
+            """,
+            variables={"id": rack_id},
+            branch_name=branch,
+        )
 
 
 async def _dci_hostvars_report(client: InfrahubClient, branch: str, device_names: list[str]) -> dict:
