@@ -63,6 +63,7 @@ from .helpers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
     from infrahub_sdk import InfrahubClient
@@ -480,9 +481,10 @@ class TestE2EPipeline(TestInfrahubDockerClient):
             await _run_generator_for_nodes(
                 client, PIPELINE_BRANCH, GENERATOR_RACK, [rack_id for _, rack_id in rack_targets]
             )
+            stable_snapshot = _stable_rack_rerun_snapshot(required_observations=3)
             snapshot = await wait_until(
                 fetch=lambda: _rack_rerun_snapshot(client, PIPELINE_BRANCH),
-                ready=itemgetter("ready"),
+                ready=stable_snapshot,
                 timeout=GENERATOR_TIMEOUT,
                 interval=POLL_INTERVAL,
                 describe=f"rack generator rerun pass {pass_number} settled without Error",
@@ -1100,6 +1102,34 @@ async def _devices_without_structured_config(client: InfrahubClient, branch: str
         if not scf:
             without.append(f"{node['name']['value']} ({node.get('role', {}).get('value', 'unknown')})")
     return {"total": len(edges), "without": without}
+
+
+def _stable_rack_rerun_snapshot(*, required_observations: int) -> Callable[[dict], bool]:
+    """Require repeated identical ready snapshots before declaring a rack batch settled.
+
+    Rack completion schedules hostvar, structured-config, and backfill work. The
+    generator instances can briefly look idle between those stages, so a single
+    ready observation can capture a partially converged IPAM or file state.
+    """
+    previous_state: dict | None = None
+    unchanged_observations = 0
+
+    def is_stable(snapshot: dict) -> bool:
+        nonlocal previous_state, unchanged_observations
+        if not snapshot["ready"]:
+            previous_state = None
+            unchanged_observations = 0
+            return False
+
+        state = snapshot["state"]
+        if state == previous_state:
+            unchanged_observations += 1
+        else:
+            previous_state = state
+            unchanged_observations = 1
+        return unchanged_observations >= required_observations
+
+    return is_stable
 
 
 async def _rack_rerun_snapshot(client: InfrahubClient, branch: str) -> dict:
