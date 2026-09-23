@@ -1426,18 +1426,17 @@ async def _run_generator_for_nodes(
     client: InfrahubClient, branch: str, generator_name: str, node_ids: list[str]
 ) -> None:
     gen_def = await client.get(kind="CoreGeneratorDefinition", name__value=generator_name, branch=branch)
-    for node_id in node_ids:
-        await client.execute_graphql(
-            query="""
-            mutation RunGenerator($id: String!, $nodes: [String!]!) {
-                CoreGeneratorDefinitionRun(data: { id: $id, nodes: $nodes }) {
-                    ok
-                }
+    await client.execute_graphql(
+        query="""
+        mutation RunGenerator($id: String!, $nodes: [String!]!) {
+            CoreGeneratorDefinitionRun(data: { id: $id, nodes: $nodes }) {
+                ok
             }
-            """,
-            variables={"id": gen_def.id, "nodes": [node_id]},
-            branch_name=branch,
-        )
+        }
+        """,
+        variables={"id": gen_def.id, "nodes": node_ids},
+        branch_name=branch,
+    )
 
 
 async def _dci_hostvars_report(client: InfrahubClient, branch: str, device_names: list[str]) -> dict:
