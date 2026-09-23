@@ -5,9 +5,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from infrahub_sdk.exceptions import ServerNotResponsiveError
+from infrahub_sdk.exceptions import GraphQLError, ServerNotResponsiveError
 
-from solution_arista_avd.generator import GeneratorMixin, save_file_if_changed, trigger_hostvar_generation
+from solution_arista_avd.generator import (
+    GeneratorMixin,
+    claim_fabric_hostvar_cascade,
+    save_file_if_changed,
+    set_fabric_avd_hostvars_ready,
+    trigger_hostvar_generation,
+)
 from solution_arista_avd.pool_roles import ResourceRole
 
 
@@ -1101,6 +1107,106 @@ async def test_trigger_generator_raises_when_definition_is_missing() -> None:
         await trigger_hostvar_generation(client, node_ids=["device-1"])
 
     client.execute_graphql.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_set_fabric_hostvars_ready_skips_unchanged_value() -> None:
+    client = MagicMock()
+    client.execute_graphql = AsyncMock(
+        return_value={
+            "NetworkFabric": {
+                "edges": [{"node": {"avd_hostvars_ready": {"value": False, "updated_at": "2026-09-23T12:00:00Z"}}}]
+            }
+        }
+    )
+
+    changed = await set_fabric_avd_hostvars_ready(client, "fabric-1", False)
+
+    assert changed is False
+    client.execute_graphql.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_set_fabric_hostvars_ready_updates_changed_value() -> None:
+    client = MagicMock()
+    client.execute_graphql = AsyncMock(
+        side_effect=[
+            {
+                "NetworkFabric": {
+                    "edges": [{"node": {"avd_hostvars_ready": {"value": True, "updated_at": "2026-09-23T12:00:00Z"}}}]
+                }
+            },
+            {"NetworkFabricUpsert": {"ok": True, "object": {"id": "fabric-1"}}},
+        ]
+    )
+
+    changed = await set_fabric_avd_hostvars_ready(client, "fabric-1", False)
+
+    assert changed is True
+    assert client.execute_graphql.await_count == 2
+    assert client.execute_graphql.await_args_list[1].kwargs["variables"] == {"id": "fabric-1", "ready": False}
+
+
+@pytest.mark.asyncio
+async def test_claim_fabric_hostvar_cascade_creates_one_claim_and_removes_stale_claims() -> None:
+    client = MagicMock()
+    client.execute_graphql = AsyncMock(
+        side_effect=[
+            {
+                "NetworkFabric": {
+                    "edges": [{"node": {"avd_hostvars_ready": {"value": False, "updated_at": "2026-09-23T12:00:00Z"}}}]
+                }
+            },
+            {"CoreStaticKeyValueCreate": {"ok": True, "object": {"id": "claim-new"}}},
+            {"CoreStaticKeyValue": {"edges": [{"node": {"id": "claim-old"}}, {"node": {"id": "claim-new"}}]}},
+            {"CoreStaticKeyValueDelete": {"ok": True}},
+        ]
+    )
+
+    claimed = await claim_fabric_hostvar_cascade(client, "fabric-1")
+
+    assert claimed is True
+    assert client.execute_graphql.await_count == 4
+    assert client.execute_graphql.await_args_list[-1].kwargs["variables"] == {"id": "claim-old"}
+
+
+@pytest.mark.asyncio
+async def test_claim_fabric_hostvar_cascade_loses_atomic_create_race() -> None:
+    client = MagicMock()
+    collision = GraphQLError(errors=[{"message": "name must be unique"}])
+    client.execute_graphql = AsyncMock(
+        side_effect=[
+            {
+                "NetworkFabric": {
+                    "edges": [{"node": {"avd_hostvars_ready": {"value": False, "updated_at": "2026-09-23T12:00:00Z"}}}]
+                }
+            },
+            collision,
+            {"CoreStaticKeyValue": {"edges": [{"node": {"id": "claim-winner"}}]}},
+        ]
+    )
+
+    claimed = await claim_fabric_hostvar_cascade(client, "fabric-1")
+
+    assert claimed is False
+    assert client.execute_graphql.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_claim_fabric_hostvar_cascade_skips_ready_fabric() -> None:
+    client = MagicMock()
+    client.execute_graphql = AsyncMock(
+        return_value={
+            "NetworkFabric": {
+                "edges": [{"node": {"avd_hostvars_ready": {"value": True, "updated_at": "2026-09-23T12:00:00Z"}}}]
+            }
+        }
+    )
+
+    claimed = await claim_fabric_hostvar_cascade(client, "fabric-1")
+
+    assert claimed is False
+    client.execute_graphql.assert_awaited_once()
 
 
 @pytest.mark.asyncio

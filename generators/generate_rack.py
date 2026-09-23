@@ -39,6 +39,7 @@ from solution_arista_avd.generator import (  # noqa: E402
     VTEP_LOOPBACK_ROLES,
     GeneratorMixin,
     check_all_racks_generated,
+    claim_fabric_hostvar_cascade,
     set_fabric_avd_hostvars_ready,
     trigger_hostvar_generation,
 )
@@ -233,6 +234,9 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
 
         # Check if all racks in the fabric are done; if so, trigger hostvar generation
         if await check_all_racks_generated(self.client, self.fabric.id):
+            if not await claim_fabric_hostvar_cascade(self.client, self.fabric.id):
+                self.logger.info("Hostvar cascade already claimed for fabric %s", self.fabric.id)
+                return
             hostvar_target_ids = await self.hostvar_target_device_ids()
             await self.invalidate_hostvars(hostvar_target_ids)
             self.logger.info(

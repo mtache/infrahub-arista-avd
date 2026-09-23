@@ -234,9 +234,9 @@ jobs:
           INFRAHUB_TESTING_DOCKER_PULL: "false"
           INFRAHUB_TESTING_WEB_CONCURRENCY: "2"
           INFRAHUB_TESTING_API_SERVER_COUNT: "1"
-          INFRAHUB_TESTING_TASK_WORKER_COUNT: "4"
+          INFRAHUB_TESTING_TASK_WORKER_COUNT: "2"
           INFRAHUB_TESTING_TASKMGR_BACKGROUND_SVC_REPLICAS: "1"
           # Generators issue large GraphQL reads; raise the client timeout above
           # the 60s default so a busy server does not trip a false failure.
           INFRAHUB_TIMEOUT: "300"
-        run: uv run pytest tests/integration/test_infrahub.py tests/integration/test_e2e_pipeline.py -v
+        run: uv run pytest tests/integration/test_infrahub.py tests/integration/test_e2e_pipeline.py -v --durations=0

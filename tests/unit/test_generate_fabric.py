@@ -102,7 +102,13 @@ def _fabric_query_data(
 def _make_pod_generator() -> PodGenerator:
     gen = PodGenerator.__new__(PodGenerator)
     gen.client = MagicMock()
-    gen.client.execute_graphql = AsyncMock()
+    gen.client.execute_graphql = AsyncMock(
+        return_value={
+            "NetworkFabric": {
+                "edges": [{"node": {"avd_hostvars_ready": {"value": True, "updated_at": "2026-09-23T12:00:00Z"}}}]
+            }
+        }
+    )
     gen.logger = MagicMock()
     gen.create_spine_switches = AsyncMock()  # type: ignore[method-assign]
     gen.connect_spine_to_super_spine = AsyncMock()  # type: ignore[method-assign]

@@ -5,7 +5,7 @@ import logging
 from ipaddress import IPv4Network, IPv6Network, ip_network
 from typing import TYPE_CHECKING, Any, ClassVar, cast
 
-from infrahub_sdk.exceptions import ServerNotResponsiveError
+from infrahub_sdk.exceptions import GraphQLError, ServerNotResponsiveError
 from infrahub_sdk.protocols import CoreIPAddressPool, CoreIPPrefixPool, CoreNumberPool
 
 from .pool_roles import (
@@ -32,6 +32,7 @@ logger = logging.getLogger("infrahub.tasks")
 DEVICE_STATUS_PROVISIONING = "provisioning"
 AVD_DEVICES_GROUP = "avd_devices"
 VTEP_LOOPBACK_ROLES = {"leaf", "border_leaf"}
+HOSTVAR_CASCADE_CLAIM_KEY_PREFIX = "solution-arista-avd:hostvar-cascade"
 
 
 async def save_file_if_changed(
@@ -79,11 +80,39 @@ async def fetch_allocated_prefixes(
     return allocated
 
 
-async def set_fabric_avd_hostvars_ready(client: InfrahubClient, fabric_id: str, ready: bool) -> None:
-    """Set avd_hostvars_ready on a fabric via targeted GraphQL mutation.
+async def _fabric_hostvar_readiness(client: InfrahubClient, fabric_id: str) -> tuple[bool | None, str | None]:
+    """Return the fabric hostvar-readiness value and its last-update timestamp."""
+    response = await client.execute_graphql(
+        query="""
+        query FabricHostvarReadiness($id: [ID!]) {
+            NetworkFabric(ids: $id) {
+                edges {
+                    node {
+                        avd_hostvars_ready { value updated_at }
+                    }
+                }
+            }
+        }
+        """,
+        variables={"id": [fabric_id]},
+    )
+    edges = response.get("NetworkFabric", {}).get("edges", [])
+    if not edges:
+        return None, None
+    readiness = edges[0]["node"].get("avd_hostvars_ready") or {}
+    return readiness.get("value"), readiness.get("updated_at")
+
+
+async def set_fabric_avd_hostvars_ready(client: InfrahubClient, fabric_id: str, ready: bool) -> bool:
+    """Set avd_hostvars_ready only when its value changes.
 
     Workaround for SDK bug that serializes `parent: null` on hierarchical nodes.
+    Returns whether the mutation changed the value.
     """
+    current, _ = await _fabric_hostvar_readiness(client, fabric_id)
+    if current is ready:
+        return False
+
     await client.execute_graphql(
         query="""
         mutation FabricUpsert($id: String!, $ready: Boolean!) {
@@ -95,6 +124,83 @@ async def set_fabric_avd_hostvars_ready(client: InfrahubClient, fabric_id: str, 
         """,
         variables={"id": fabric_id, "ready": ready},
     )
+    return True
+
+
+async def claim_fabric_hostvar_cascade(client: InfrahubClient, fabric_id: str) -> bool:
+    """Atomically claim the current not-ready generation of a fabric.
+
+    The readiness attribute's update timestamp is the generation token. A
+    unique CoreStaticKeyValue create lets concurrent rack generators elect one
+    caller without relying on process-local locks. The winning caller removes
+    older claims for the same fabric, so only the current token remains.
+    """
+    ready, generation_token = await _fabric_hostvar_readiness(client, fabric_id)
+    if ready is not False or not generation_token:
+        return False
+
+    claim_key = f"{HOSTVAR_CASCADE_CLAIM_KEY_PREFIX}:{fabric_id}"
+    token_hash = hashlib.sha256(generation_token.encode()).hexdigest()[:16]
+    claim_name = f"avd-hostvar-cascade-{fabric_id}-{token_hash}"
+
+    try:
+        response = await client.execute_graphql(
+            query="""
+            mutation ClaimHostvarCascade($name: String!, $key: String!, $value: String!) {
+                CoreStaticKeyValueCreate(
+                    data: {
+                        name: { value: $name }
+                        key: { value: $key }
+                        value: { value: $value }
+                    }
+                ) {
+                    ok
+                    object { id }
+                }
+            }
+            """,
+            variables={"name": claim_name, "key": claim_key, "value": generation_token},
+        )
+    except GraphQLError:
+        existing = await client.execute_graphql(
+            query="""
+            query ExistingHostvarCascadeClaim($name: String!) {
+                CoreStaticKeyValue(name__value: $name) { edges { node { id } } }
+            }
+            """,
+            variables={"name": claim_name},
+        )
+        if existing.get("CoreStaticKeyValue", {}).get("edges"):
+            return False
+        raise
+
+    claim_id = ((response.get("CoreStaticKeyValueCreate") or {}).get("object") or {}).get("id")
+    if not claim_id:
+        msg = f"Hostvar cascade claim creation returned no object for fabric {fabric_id}"
+        raise RuntimeError(msg)
+
+    stale_claims = await client.execute_graphql(
+        query="""
+        query StaleHostvarCascadeClaims($key: String!) {
+            CoreStaticKeyValue(key__value: $key) { edges { node { id } } }
+        }
+        """,
+        variables={"key": claim_key},
+    )
+    for edge in stale_claims.get("CoreStaticKeyValue", {}).get("edges", []):
+        stale_id = edge["node"]["id"]
+        if stale_id == claim_id:
+            continue
+        await client.execute_graphql(
+            query="""
+            mutation DeleteStaleHostvarCascadeClaim($id: String!) {
+                CoreStaticKeyValueDelete(data: { id: $id }) { ok }
+            }
+            """,
+            variables={"id": stale_id},
+        )
+
+    return True
 
 
 class GeneratorMixin:
