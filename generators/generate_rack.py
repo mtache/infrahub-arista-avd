@@ -601,7 +601,6 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
             logger=self.logger,
             cabling_plan=created_cabling_plan,
             link_role="uplink",
-            medium="mmf",
         )
 
     async def create_l2leaf_switches(self) -> None:
@@ -661,5 +660,4 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
             logger=self.logger,
             cabling_plan=created_cabling_plan,
             link_role="uplink",
-            medium="mmf",
         )

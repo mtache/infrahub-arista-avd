@@ -427,7 +427,7 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         assert report["server_physical_lags"] == {"Ethernet1": "Bond1", "Ethernet2": "Bond1"}
         assert report["server_bond_members"] == ["Ethernet1", "Ethernet2"]
         assert report["server_link_count"] == 2
-        assert all(link["medium"] == "copper" for link in report["server_link_metadata"])
+        assert all(link["medium"] is None for link in report["server_link_metadata"])
         assert all(link["role"] is None for link in report["server_link_metadata"])
         assert all(
             link["name"].startswith(f"{SERVER_CABLING_SERVER}-Ethernet")
@@ -830,7 +830,7 @@ async def _cabling_and_ip_report(client: InfrahubClient, branch: str) -> dict:
             }
             for link in uplinks
             if not link.name.value.startswith("Uplink ")
-            or getattr(getattr(link, "medium", None), "value", None) != "mmf"
+            or getattr(getattr(link, "medium", None), "value", None) is not None
         ),
         key=itemgetter("name"),
     )

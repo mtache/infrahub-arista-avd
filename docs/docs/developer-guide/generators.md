@@ -304,12 +304,13 @@ VTEP loopback IP, and ASN. Existing non-empty operator values, including
 
 Inter-switch cabling follows the same preservation rule. Pod and rack generators
 create spine-to-super-spine, leaf-to-spine, and l2leaf-to-leaf links with
-`role=uplink`, `medium=mmf`, and device-pair names such as
-`Uplink leaf-a__spine-a`. Parallel links receive stable numeric suffixes in
-natural interface order. Only links already using the current generated name
-are reconciled; manual or conflicting connectors are not reassigned. Server
-cabling remains separate and keeps interface-based copper links with no link
-role.
+`role=uplink` and device-pair names such as `Uplink leaf-a__spine-a`. Parallel
+links receive stable numeric suffixes in natural interface order. Only links
+already using the current generated name are reconciled; manual or conflicting
+connectors are not reassigned. Generators leave `medium` unset on every link so
+users can select it after generation or customize the generator for their use
+case. Server cabling remains separate and keeps interface-based links with no
+link role.
 
 ## Running generators
 

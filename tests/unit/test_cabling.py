@@ -205,7 +205,6 @@ class TestConnectInterfaceMaps:
         client.create.assert_awaited_once_with(
             kind="NetworkLink",
             name="leaf-1-Ethernet1__spine-1-Ethernet1",
-            medium="copper",
         )
         network_link.save.assert_awaited_once_with(allow_upsert=True)
         assert src_fetched_iface.connector is network_link
@@ -216,7 +215,7 @@ class TestConnectInterfaceMaps:
         dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
 
     @pytest.mark.asyncio
-    async def test_creates_uplink_with_device_pair_name_role_and_mmf(self) -> None:
+    async def test_creates_uplink_with_device_pair_name_and_role_without_medium(self) -> None:
         src_query_iface = _physical_interface("src-query", "leaf-1", "Ethernet49")
         dst_query_iface = _physical_interface("dst-query", "spine-1", "Ethernet1")
         src_fetched_iface = _physical_interface("src-query", "leaf-1", "Ethernet49")
@@ -233,20 +232,18 @@ class TestConnectInterfaceMaps:
             logger,
             [(src_query_iface, dst_query_iface)],  # type: ignore[arg-type]
             link_role="uplink",
-            medium="mmf",
         )
 
         client.create.assert_awaited_once_with(
             kind="NetworkLink",
             name="Uplink leaf-1__spine-1",
-            medium="mmf",
             role="uplink",
         )
         assert src_fetched_iface.connector is network_link
         assert dst_fetched_iface.connector is network_link
 
     @pytest.mark.asyncio
-    async def test_reuses_attached_current_uplink_and_reconciles_metadata(self) -> None:
+    async def test_reuses_attached_current_uplink_and_preserves_user_medium(self) -> None:
         uplink_name = "Uplink leaf-1__spine-1"
         src_query_iface = _physical_interface("src-query", "leaf-1", "Ethernet49")
         dst_query_iface = _physical_interface("dst-query", "spine-1", "Ethernet1")
@@ -270,13 +267,12 @@ class TestConnectInterfaceMaps:
             logger,
             [(src_query_iface, dst_query_iface)],  # type: ignore[arg-type]
             link_role="uplink",
-            medium="mmf",
         )
 
         client.create.assert_not_awaited()
         uplink.save.assert_awaited_once_with(allow_upsert=True)
         assert uplink.name.value == uplink_name
-        assert uplink.medium.value == "mmf"
+        assert uplink.medium.value == "copper"
         assert uplink.role.value == "uplink"
         src_fetched_iface.save.assert_not_awaited()
         dst_fetched_iface.save.assert_not_awaited()
@@ -305,7 +301,6 @@ class TestConnectInterfaceMaps:
             logger,
             [(src_query_iface, dst_query_iface)],  # type: ignore[arg-type]
             link_role="uplink",
-            medium="mmf",
         )
 
         client.create.assert_not_awaited()
@@ -336,7 +331,6 @@ class TestConnectInterfaceMaps:
             logger,
             [(src_query_iface, dst_query_iface)],  # type: ignore[arg-type]
             link_role="uplink",
-            medium="mmf",
         )
 
         client.create.assert_not_awaited()

@@ -109,8 +109,9 @@ Adding a new device design for a supported role is data, not a schema change. De
 A cabled connection between interfaces. Inherits `Dcim.Connector`, so it has `name` and `medium` (`mmf`, `smf`, `copper`) and relates to `connected_endpoints` → `DcimEndpoint`.
 
 - **Roles**: generated inter-switch links use `role=uplink`; DCI connections use `role=dci` rather than a separate schema node. Server links keep an unset role.
-- **Generated uplinks**: named `Uplink <lower-device>__<upper-device>` and use `medium=mmf`. Parallel links add a stable, naturally ordered numeric suffix (`... 1`, `... 2`). Existing manual or conflicting connectors are preserved rather than reassigned.
-- **Generated server links**: retain interface-based names and `medium=copper`.
+- **Generated uplinks**: named `Uplink <lower-device>__<upper-device>`. Parallel links add a stable, naturally ordered numeric suffix (`... 1`, `... 2`). Existing manual or conflicting connectors are preserved rather than reassigned.
+- **Generated link medium**: left unset for uplinks and server links. Set it manually after generation or customize the generator for the required medium.
+- **Generated server links**: retain interface-based names and an unset role.
 - **DCI attributes**: `role` (`dci`) and `include_in_underlay_protocol` (Boolean, default `true`). BGP ASNs are taken from each endpoint device's own `asn`, not stored on the link.
 - **Relationships**: inherited `connected_endpoints`; no DCI-specific endpoint, pool, subnet, endpoint IP, speed, BFD, MTU, external-network, or EVPN Gateway fields are added.
 - **Addressing source**: the hostvars generator allocates one `/31` per valid DCI-role link from `NetworkFabric.fabric_ip_pools` role `dci`, then the legacy `NetworkFabric.dci_pool` fallback, then a deterministic Fabric Supernet-derived fallback when the required DCI prefix-pool role is missing.

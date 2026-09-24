@@ -265,7 +265,6 @@ class PodGenerator(InfrahubGenerator, GeneratorMixin):
             logger=self.logger,
             cabling_plan=created_cabling_plan,
             link_role="uplink",
-            medium="mmf",
         )
 
     async def update_checksum(self) -> None:

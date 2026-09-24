@@ -120,21 +120,21 @@ async def connect_interface_maps(
     cabling_plan: list[tuple[DcimInterface, DcimInterface]],
     *,
     link_role: str | None = None,
-    medium: str = "copper",
 ) -> None:
     """Create or reconcile links for an interface cabling plan.
 
     The default path preserves the existing server-link contract: interface-based
-    names, no link role, and copper medium. Inter-switch callers opt into
-    ``link_role="uplink"`` and ``medium="mmf"``. Uplinks use device-pair names
-    and only reconcile links already generated with the current naming scheme.
+    names and no link role. Inter-switch callers opt into ``link_role="uplink"``.
+    Generators leave the link medium unset for users to define. Uplinks use
+    device-pair names and only reconcile links already generated with the current
+    naming scheme.
     """
     for link_spec in _build_link_specs(cabling_plan, link_role=link_role):
         if link_role == "uplink":
-            await _connect_uplink(client, logger, link_spec, medium=medium)
+            await _connect_uplink(client, logger, link_spec)
             continue
 
-        network_link = await client.create(kind="NetworkLink", name=link_spec.name, medium=medium)
+        network_link = await client.create(kind="NetworkLink", name=link_spec.name)
         await network_link.save(allow_upsert=True)
 
         src_populated = await _connect_interface_if_missing(client, logger, link_spec.src_interface, network_link)
@@ -208,7 +208,7 @@ def _natural_sort_key(value: str) -> tuple[tuple[int, str | int], ...]:
     return tuple((1, int(part)) if part.isdecimal() else (0, part.casefold()) for part in re.split(r"(\d+)", value))
 
 
-async def _connect_uplink(client: InfrahubClient, logger: logging.Logger, link_spec: _LinkSpec, *, medium: str) -> None:
+async def _connect_uplink(client: InfrahubClient, logger: logging.Logger, link_spec: _LinkSpec) -> None:
     src_interface = await _get_physical_interface(client, link_spec.src_interface)
     dst_interface = await _get_physical_interface(client, link_spec.dst_interface)
     src_connector_id = _relationship_node_id(getattr(src_interface, "connector", None))
@@ -236,14 +236,13 @@ async def _connect_uplink(client: InfrahubClient, logger: logging.Logger, link_s
             return
 
         network_link = attached_link
-        await _ensure_generated_uplink_metadata(network_link, medium=medium)
+        await _ensure_generated_uplink_role(network_link)
         logger.info("Reconciled generated uplink %s", link_spec.name)
 
     if network_link is None:
         network_link = await client.create(
             kind="NetworkLink",
             name=link_spec.name,
-            medium=medium,
             role="uplink",
         )
         await network_link.save(allow_upsert=True)
@@ -257,8 +256,7 @@ async def _connect_uplink(client: InfrahubClient, logger: logging.Logger, link_s
         logger.info("Preserved existing connector state for %s", link_spec.name)
 
 
-async def _ensure_generated_uplink_metadata(network_link: object, *, medium: str) -> None:
-    _set_node_attribute_value(network_link, "medium", medium)
+async def _ensure_generated_uplink_role(network_link: object) -> None:
     _set_node_attribute_value(network_link, "role", "uplink")
     await network_link.save(allow_upsert=True)  # type: ignore[attr-defined]
 
