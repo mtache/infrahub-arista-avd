@@ -106,7 +106,7 @@ Adding a new device design for a supported role is data, not a schema change. De
 
 ### `NetworkLink` — `Network.Link`
 
-A cabled connection between interfaces. Inherits `Dcim.Connector`, so it has `name` and `medium` (`mmf`, `smf`, `copper`) and relates to `connected_endpoints` → `DcimEndpoint`.
+A cabled connection between interfaces. Inherits `Dcim.Connector`, so it has `name`, an optional `medium` (`mmf`, `smf`, `copper`), and relates to `connected_endpoints` → `DcimEndpoint`.
 
 - **Roles**: generated inter-switch links use `role=uplink`; DCI connections use `role=dci` rather than a separate schema node. Server links keep an unset role.
 - **Generated uplinks**: named `Uplink <lower-device>__<upper-device>`. Parallel links add a stable, naturally ordered numeric suffix (`... 1`, `... 2`). Existing manual or conflicting connectors are preserved rather than reassigned.

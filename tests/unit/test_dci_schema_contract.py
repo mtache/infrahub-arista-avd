@@ -68,6 +68,15 @@ def test_network_link_role_supports_uplink_and_dci_choices_and_stays_optional() 
     assert choices["dci"] == "DCI"
 
 
+def test_dcim_connector_medium_is_optional_and_user_defined() -> None:
+    connector = _extension_node(_load_yaml("schemas/dcim_extensions.yml"), "DcimConnector")
+    medium = _attrs(connector)["medium"]
+
+    assert medium["kind"] == "Dropdown"
+    assert medium["optional"] is True
+    assert {choice["name"] for choice in medium["choices"]} == {"mmf", "smf", "copper"}
+
+
 def test_interface_role_choices_include_peering_for_dci_endpoints() -> None:
     interface = _extension_node(_load_yaml("schemas/dcim_extensions.yml"), "DcimInterface")
     role = _attrs(interface)["role"]

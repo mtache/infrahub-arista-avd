@@ -194,7 +194,7 @@ extensions:
         - name: medium
           label: Medium
           kind: Dropdown
-          optional: false
+          optional: true
           choices:
             - name: mmf
               label: Multi-Mode Fibre
