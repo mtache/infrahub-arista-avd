@@ -138,6 +138,7 @@ celerybeat.pid
 .env
 .env*
 !.env.example
+.semaphore-backups/
 .venv
 .venv/
 env/
