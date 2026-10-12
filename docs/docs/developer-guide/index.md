@@ -24,10 +24,10 @@ cd docs
 pnpm run typecheck
 ```
 
-`invoke test` also runs integration tests. Integration and generator idempotence
-checks require explicit authorization when using an agent because they use
-external infrastructure. Unit tests and image smoke checks do not establish
-full integration compatibility.
+`invoke test` also runs integration tests. Integration tests are time-consuming
+and must be run manually by the user before claiming full integration
+compatibility. Generator changes also require idempotence validation. Unit tests
+and image smoke checks do not establish full integration compatibility.
 
 The custom Infrahub image extends the Python environment inherited from
 Infrahub 1.11.5. Its build selects `/.venv/bin/python`, disables interpreter
