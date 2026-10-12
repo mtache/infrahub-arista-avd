@@ -235,7 +235,7 @@ def test_template_capacity_for_preserved_topologies() -> None:
         ("campus", 1, 1, 2),
         ("isis-ldp", 1, 1, 0),
         ("l2ls", 1, 2, 4),
-        ("l3ls-multi-domain", 2, 4, 0),
+        ("l3ls-multi-domain", 2, 4, 2),
         ("l3ls-multipod-a", 3, 8, 3),
         ("l3ls-multipod-b", 3, 8, 2),
         ("single-dc-l3ls", 1, 2, 3),
