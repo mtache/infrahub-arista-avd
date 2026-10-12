@@ -7,9 +7,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src/ src/
 
-RUN uv sync --group catalog --no-dev --frozen \
-      --python /usr/local/bin/python --no-python-downloads && \
-    uv pip check --python /app/.venv/bin/python
+RUN uv sync --group catalog --no-dev --frozen
 
 COPY service_catalog/ service_catalog/
 
