@@ -32,7 +32,7 @@ Key docs to read before larger changes:
 - `ansible/` - playbooks Semaphore runs, including ContainerLab deployment.
 - `schemas/` - Infrahub schema definitions, split between base schemas and
   project/feature extensions.
-- `objects/` - seed data loaded in filename order.
+- `objects/` - Common seed data, followed by selectable fabric directories; filenames order dependencies within each directory.
 - `menus/` - Infrahub UI menu definitions.
 - `docs/` - Docusaurus documentation.
 - `lab/` - ContainerLab artifact/deployment helpers.
@@ -148,6 +148,7 @@ uv run invoke restart
 uv run invoke restart --component=infrahub-server
 uv run invoke restart --component=service-catalog
 uv run invoke load
+uv run invoke load-objects --fabrics=all --branch=<branch-name>
 uv run invoke load-schema
 uv run invoke load-menu
 uv run invoke init-semaphore
@@ -200,7 +201,7 @@ uv run infrahubctl branch create <branch-name>
 uv run infrahubctl schema check schemas/ --branch <branch-name>
 uv run infrahubctl schema load schemas --branch <branch-name>
 uv run infrahubctl menu load menus/ --branch <branch-name>
-uv run infrahubctl object load objects/ --branch <branch-name>
+uv run invoke load-objects --fabrics=all --branch=<branch-name>
 uv run infrahubctl object load repository.yml --branch <branch-name>
 uv run infrahubctl object load triggers.yml --branch <branch-name>
 uv run infrahubctl graphql export-schema --destination schema.graphql

@@ -48,13 +48,17 @@ uv run invoke load
 
 Open the Infrahub UI at `http://localhost:8000` and the service portal at `http://localhost:8501`.
 
+Set `INFRAHUB_SEED_FABRICS` in `.env` or the shell to select examples, such as
+`l3ls-multi-domain` or `l2ls,campus`. The default `all` loads seven fabrics; `none` loads Common only.
+See the [seed selection and example catalog](docs/docs/quick-start.md#choose-the-seed-fabrics).
+
 Then follow [Provision Your First Fabric](docs/docs/provision-first-fabric.md) to run the generator chain and reach rendered EOS artifacts.
 
 ## What You'll See
 
 After `invoke load` completes and you run the generator chain on a fabric:
 
-1. **Seed data appears in the UI** — manufacturers, device types, addressing pools, device templates, two example fabrics (Fabric-L3LS-MultiPod-A, Fabric-L3LS-MultiPod-B) with pods and racks, and seed VLANs are loaded.
+1. **Seed data appears in the UI** — manufacturers, device types, addressing pools, device templates, the selected example fabrics (all seven by default) with pods and racks, and seed VLANs are loaded.
 2. **FabricGenerator runs** — super-spine devices appear on the branch, with loopback and management addresses allocated from pools.
 3. **PodGenerator and RackGenerator trigger automatically** — spine and leaf devices appear, cabled to their uplinks, with interconnect addresses, BGP ASNs, and node IDs assigned.
 4. **AVD generators run** — each device's PyAVD host_vars and structured configuration are stored as `AvdArtifact` graph objects.
@@ -81,7 +85,7 @@ After `invoke load` completes and you run the generator chain on a fabric:
   - Cabling plan CSV
   - ANTA test catalogs and on-demand post-deployment validation through Semaphore
   - Computed interface descriptions
-- **Seed data** — manufacturers, device types, addressing and number pools (loopback, interconnect, management, ASN, node ID), device profiles and templates, two example fabrics with pods and racks, and seed VLANs.
+- **Seed data** — manufacturers, device types, addressing and number pools (loopback, interconnect, management, ASN, node ID), device profiles and templates, seven independently selectable fabrics with pods and racks, and seed VLANs.
 - **Service portal** — Streamlit application with guided day-2 workflows:
   - Add network segment (VRF, VLAN, SVI)
   - Provision server into a rack
@@ -95,7 +99,7 @@ After `invoke load` completes and you run the generator chain on a fabric:
 | `schemas/` | YAML schema definitions for the full data model |
 | `generators/` | Python generators (fabric, pod, rack, AVD hostvars, structured config, server cabling) |
 | `transforms/` | Python and Jinja2 transforms (EOS config, docs, cabling plan, ANTA catalog, interface descriptions) |
-| `objects/` | Seed YAML (manufacturers, device types, pools, profiles, templates, fabrics, racks, VLANs) |
+| `objects/` | Seed YAML: shared data in `common/`, then one directory per fabric |
 | `triggers.yml` | Event trigger rules wiring schema changes to generator runs |
 | `service_catalog/` | Streamlit service portal |
 | `docker-compose.yml` | Stack definition; docker-compose.override.yml adds the portal and Semaphore |
