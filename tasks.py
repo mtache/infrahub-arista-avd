@@ -245,6 +245,8 @@ def _reconcile_anta_environment(api: _SemaphoreClient, project_id: int, workspac
 
     environment_id = int(str(existing["id"]))
     payload = _anta_environment_payload(project_id, workspace)
+    # Semaphore requires the same numeric ID in the update body and URL.
+    payload["id"] = environment_id
     payload["json"] = json.dumps(variables)
     payload["env"] = str(existing.get("env") or "{}")
     api.update(f"{list_url}/{environment_id}", payload)

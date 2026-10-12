@@ -1,0 +1,1 @@
+Fix repeated `invoke load` and `invoke init-semaphore` runs failing with HTTP 400 when updating the existing ANTA environment. Include the environment ID required by Semaphore while preserving operator variable overrides.

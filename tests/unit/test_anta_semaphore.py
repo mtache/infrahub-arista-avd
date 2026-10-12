@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+import httpx
 import yaml
 from invoke import Context
 
@@ -220,6 +221,7 @@ def test_existing_anta_environment_is_reconciled_without_overwriting_operator_va
 
     resource_url, payload = api.updated[0]
     assert resource_url == f"{url}/42"
+    assert payload["id"] == 42
     assert payload["env"] == '{"EXISTING":"value"}'
     assert json.loads(str(payload["json"])) == {
         "fabric_name": "Fabric-A",
@@ -228,6 +230,41 @@ def test_existing_anta_environment_is_reconciled_without_overwriting_operator_va
         "anta_password": "",
         "anta_enable": True,
     }
+
+
+def test_anta_environment_creation_and_repeated_updates_match_semaphore_api(monkeypatch: MonkeyPatch) -> None:
+    environment: dict[str, object] | None = None
+    writes: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        nonlocal environment
+        if request.method == "GET" and request.url.path == "/api/project/7/environment":
+            return httpx.Response(200, json=[environment] if environment else [])
+        payload = json.loads(request.content)
+        if request.method == "POST" and request.url.path == "/api/project/7/environment":
+            assert environment is None
+            environment = {**payload, "id": 42}
+            writes.append("POST")
+            return httpx.Response(201, json=environment)
+        if request.method == "PUT" and request.url.path == "/api/project/7/environment/42":
+            assert environment is not None
+            # Semaphore v2.17 rejects a missing/mismatched numeric ID on updates.
+            if payload.get("id") != environment["id"]:
+                return httpx.Response(400, json={"error": "Environment ID in body and URL must be the same"})
+            if payload.get("project_id") != environment["project_id"]:
+                return httpx.Response(400, json={"error": "Project ID in body and URL must be the same"})
+            environment = payload
+            writes.append("PUT")
+            return httpx.Response(204)
+        raise AssertionError(f"Unexpected Semaphore request: {request.method} {request.url.path}")
+
+    with httpx.Client(base_url="http://semaphore", transport=httpx.MockTransport(handle)) as client:
+        monkeypatch.setattr(tasks.httpx, "Client", lambda **_kwargs: client)
+        api = tasks._SemaphoreClient("http://semaphore")
+        for _ in range(3):
+            assert tasks._reconcile_anta_environment(api, 7, "/opt/semaphore/anta") == 42
+
+    assert writes == ["POST", "PUT", "PUT"]
 
 
 def test_empty_environment_is_detached_and_deleted_idempotently() -> None:
