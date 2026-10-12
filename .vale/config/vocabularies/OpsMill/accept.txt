@@ -28,6 +28,7 @@ uv
 yamllint
 
 # Acronyms and initialisms
+APIs
 ASNs
 CSVs
 IPs
@@ -73,6 +74,9 @@ upsert
 upserted
 
 # General technical usage
+booleans
+rebase
+worktree
 checksumming
 config
 configs

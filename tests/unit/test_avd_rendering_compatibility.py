@@ -82,7 +82,7 @@ def fabric_inputs(scenario: str) -> dict[str, dict]:
                             "ip_address": "192.0.2.1" if scenario == "gateway-alternate" else "10.0.0.1",
                         }
                     ]
-                    if hostname == "leaf1"
+                    if hostname == "leaf1" and scenario != "gateway-remote"
                     else []
                 ),
                 "evpn_l2": {"enabled": True},
@@ -104,7 +104,7 @@ def structured_configs(hostvars: dict[str, dict]) -> dict[str, dict]:
     }
 
 
-@pytest.mark.parametrize("scenario", ["l3ls", "l2ls", "gateway", "gateway-alternate"])
+@pytest.mark.parametrize("scenario", ["l3ls", "l2ls", "gateway", "gateway-alternate", "gateway-remote"])
 async def test_real_rendering_from_stored_files(scenario: str) -> None:
     hostvars = fabric_inputs(scenario)
     configs = structured_configs(hostvars)
@@ -176,6 +176,9 @@ async def test_real_rendering_from_stored_files(scenario: str) -> None:
     fabric_transform._init_client = client
     assert "Fixture" in await fabric_transform.transform(fabric_data)
 
+    unfiltered_catalog = await _transform(configs["leaf1"]).transform(_data(anta_enabled=True))
+    assert "VerifyInterfaceDiscards" in unfiltered_catalog
+    assert "VerifyLoggingErrors" in unfiltered_catalog
     catalog = await _transform(configs["leaf1"]).transform(
         _data(
             anta_enabled=True,

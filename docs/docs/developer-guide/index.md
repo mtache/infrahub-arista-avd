@@ -9,6 +9,47 @@ hide_table_of_contents: true
 
 This guide is for **contributors** who want to extend, debug, or maintain the AVD pipeline — adding device roles, transform outputs, schema fields, or fixing pipeline issues. It assumes familiarity with Python, GraphQL, and Infrahub generators/transforms.
 
+## Contributor runtime and validation
+
+Use Python **3.14.7**; the solution supports `>=3.14,<3.15`. Python 3.11–3.13
+support has been removed. Install the committed dependency lock and run unit
+tests directly:
+
+```bash
+uv sync --all-packages --frozen
+uv run pytest tests/unit
+uv run invoke lint
+uv run invoke docs
+cd docs
+pnpm run typecheck
+```
+
+`invoke test` also runs integration tests. Integration and generator idempotence
+checks require explicit authorization when using an agent because they use
+external infrastructure. Unit tests and image smoke checks do not establish
+full integration compatibility.
+
+The custom Infrahub image extends the Python environment inherited from
+Infrahub 1.11.5. Its build selects `/.venv/bin/python`, disables interpreter
+downloads, retains existing server packages, and checks imports and dependency
+consistency. The portal uses `python:3.14.7-slim` and starts Streamlit with
+`uv run --no-sync`. Semaphore retains its separate Python and Ansible runtime.
+
+Build and check disposable candidate images without starting Compose:
+
+```bash
+docker build -t avd-infrahub-candidate .
+docker build -f Dockerfile.catalog -t avd-portal-candidate .
+docker build -t avd-semaphore-candidate semaphore
+bash scripts/smoke_images.sh avd-infrahub-candidate avd-portal-candidate avd-semaphore-candidate
+```
+
+The smoke script checks server, worker, and task-manager imports, inherited
+Infrahub/SDK versions, package consistency, portal health, and Semaphore AVD
+versions and playbook syntax. Its containers have no external network access;
+it does not run deployment playbooks or device tests. CI runs this check
+independently of the E2E job when images or dependencies change.
+
 ## Start here
 
 1. **[Architecture Overview](./architecture.md)** — system components, data model hierarchy, and the generator pipeline at a glance.
