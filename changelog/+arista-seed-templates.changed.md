@@ -1,0 +1,1 @@
+Use Arista switch templates throughout the examples and give each fabric its own server profiles, templates, and VLAN references. MultiPod B now has dedicated Servers and Storage VLANs without an EVPN tenant or VRF.

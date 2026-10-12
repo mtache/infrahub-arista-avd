@@ -22,13 +22,6 @@ kind: Object
 spec:
   kind: DcimDeviceType
   data:
-    - name: "PowerSwitch Z9864F-ON"
-      manufacturer: ["Dell"]
-    - name: "PowerSwitch S5232F-ON"
-      manufacturer: ["Dell"]
-    # containerlab_interface_mapping is the filename as shipped in
-    # lab/configs/eos-intf-mapping/. It intentionally differs from part_number:
-    # the mapping files are named ...-32S.json / ...-48YC8.json.
     - name: "Arista 7050CX3-32C"
       manufacturer: Arista
       platform: EOS

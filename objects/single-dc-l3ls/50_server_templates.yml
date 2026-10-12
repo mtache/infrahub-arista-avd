@@ -1,0 +1,44 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: TemplateComputePhysicalServer
+  parameters:
+    expand_range: true
+  data:
+    - template_name: "sdc-l3ls-compute-server-single"
+      role: "compute"
+      status: "provisioning"
+      interfaces:
+        kind: TemplateInterfacePhysical
+        parameters:
+          expand_range: true
+        data:
+          - template_name: "SdcL3lsComputeServerSingleEthernet1"
+            name: "Ethernet1"
+            profiles:
+              - "profile-sdc-l3ls-server-compute"
+    - template_name: "sdc-l3ls-compute-server-dual"
+      role: "compute"
+      status: "provisioning"
+      interfaces:
+        kind: TemplateInterfacePhysical
+        parameters:
+          expand_range: true
+        data:
+          - template_name: "SdcL3lsComputeServerDualEthernet[1-2]"
+            name: "Ethernet[1-2]"
+            profiles:
+              - "profile-sdc-l3ls-server-compute"
+    - template_name: "sdc-l3ls-gpu-server-single"
+      role: "gpu"
+      status: "provisioning"
+      interfaces:
+        kind: TemplateInterfacePhysical
+        parameters:
+          expand_range: true
+        data:
+          - template_name: "SdcL3lsGpuServerSingleEthernet1"
+            name: "Ethernet1"
+            profiles:
+              - "profile-sdc-l3ls-server-gpu"

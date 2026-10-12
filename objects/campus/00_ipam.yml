@@ -1,0 +1,97 @@
+---
+# ============================================================================
+# Fabric-Campus — three-tier campus example (AVD "campus-fabric").
+# underlay_routing_protocol: ospf -> the pod/rack generators create l3spine
+# core switches (SVI routing) and l2leaf access switches. Campus access
+# features (dot1x, PoE, port profiles) are supplied via avd_custom_hostvars.
+# ============================================================================
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: IpamPrefix
+  data:
+    - prefix: 10.61.0.0/24
+      role: management
+    - prefix: 10.61.1.0/24
+      role: loopback
+    - prefix: 10.61.2.0/24
+      role: loopback-vtep
+    - prefix: 10.61.3.0/24
+      role: fabric_point_to_point
+    - prefix: 10.61.4.0/24     # MLAG peer-link addressing (l2leaf access pair)
+      role: mlag
+    - prefix: 10.61.5.0/24     # MLAG L3 peering, advertised into the OSPF underlay
+      role: mlag_peering
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: CoreIPPrefixPool
+  data:
+    - name: Fabric-Campus-Uplink-Pool
+      default_member_type: prefix
+      default_prefix_type: IpamPrefix
+      default_prefix_length: 31
+      ip_namespace: default
+      resources:
+        - 10.61.3.0/24
+    - name: Fabric-Campus-VTEP-Pool
+      default_member_type: prefix
+      default_prefix_type: IpamPrefix
+      default_prefix_length: 32
+      ip_namespace: default
+      resources:
+        - 10.61.2.0/24
+    - name: Fabric-Campus-Loopback-Pool
+      default_member_type: prefix
+      default_prefix_type: IpamPrefix
+      default_prefix_length: 32
+      ip_namespace: default
+      resources:
+        - 10.61.1.0/24
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: CoreIPAddressPool
+  data:
+    - name: Fabric-Campus-Mgmt-Pool
+      default_address_type: IpamIPAddress
+      default_prefix_length: 24
+      ip_namespace: default
+      resources:
+        - 10.61.0.0/24
+    # MLAG peer-link pool for the l2leaf access-tier pair. /31 members, disjoint
+    # from the management/loopback/vtep/uplink subnets and the inband-mgmt subnet.
+    - name: Fabric-Campus-MLAG-Peer-Pool
+      default_address_type: IpamIPAddress
+      default_prefix_length: 31
+      ip_namespace: default
+      resources:
+        - 10.61.4.0/24
+    # MLAG L3 peering pool. Required alongside the peer-link pool because the
+    # fabric defines an underlay routing protocol (ospf) and CAMPUS_IDF1 is an
+    # MLAG rack; without it the fabric pool check fails and the generator falls
+    # back to a shared default subnet.
+    - name: Fabric-Campus-MLAG-L3-Peering-Pool
+      default_address_type: IpamIPAddress
+      default_prefix_length: 31
+      ip_namespace: default
+      resources:
+        - 10.61.5.0/24
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: CoreNumberPool
+  data:
+    - name: Fabric-Campus-ASN-Pool
+      node: RoutingAsn
+      node_attribute: asn
+      start_range: 65700
+      end_range: 65799
+    - name: Fabric-Campus-NodeID-Pool
+      node: DcimDevice
+      node_attribute: node_id
+      start_range: 1
+      end_range: 100

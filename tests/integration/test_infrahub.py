@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+import shlex
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
@@ -28,7 +32,7 @@ class TestInfrahub(TestInfrahubDockerClient):
         schemas: list[dict],
         infrahub_port: int,
     ) -> None:
-        """Load schemas then load all object files via infrahubctl object load."""
+        """Load schemas then explicitly select all seeds through the shared loader."""
         await client.schema.wait_until_converged(branch=default_branch)
 
         resp = await client.schema.load(schemas=schemas, branch=default_branch, wait_until_converged=True)
@@ -38,7 +42,7 @@ class TestInfrahub(TestInfrahubDockerClient):
         infrahub_address = f"http://localhost:{infrahub_port}"
         result = self.execute_command(
             address=infrahub_address,
-            command="infrahubctl object load objects/",
+            command=f"invoke load-objects --fabrics=all --branch={shlex.quote(default_branch)}",
         )
         print(result.stdout, flush=True)
         if result.stderr:

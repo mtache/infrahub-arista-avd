@@ -1,0 +1,23 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: IpamL2Domain
+  data:
+    - name: Fabric-L3LS-MultiPod-B-L2Domain
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: IpamVLAN
+  data:
+    - name: MultiPod-B-Servers
+      vlan_id: 300
+      status: active
+      role: server
+      l2domain: Fabric-L3LS-MultiPod-B-L2Domain
+    - name: MultiPod-B-Storage
+      vlan_id: 400
+      status: active
+      role: server
+      l2domain: Fabric-L3LS-MultiPod-B-L2Domain

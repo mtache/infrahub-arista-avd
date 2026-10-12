@@ -58,8 +58,11 @@ ALL_ARTIFACT_NAMES = [
 # count each object template must expand to (Ethernet ports + 1 Loopback0).
 ARISTA_DEVICE_TYPES = ("Arista 7050SX3-48YC8C", "Arista 7050CX3-32C")
 ARISTA_TEMPLATE_INTERFACE_COUNTS = {
+    "arista-7050cx3-32c-super-spine-switch": 33,
     "arista-7050cx3-32c-spine-switch": 33,  # 32x 100G QSFP + Loopback0
+    "arista-7050cx3-32c-multipod-spine-switch": 33,
     "arista-7050sx3-48yc8c-leaf-switch": 57,  # 48x 25G + 8x 100G QSFP + Loopback0
+    "arista-7050sx3-48yc8c-l2leaf-switch": 57,
 }
 
 # Marker the ANTA transform emits when the fabric has ANTA disabled

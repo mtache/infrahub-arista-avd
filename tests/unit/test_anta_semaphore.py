@@ -34,10 +34,16 @@ def test_fabric_anta_filters_schema_and_example_data_contract() -> None:
     assert attribute["kind"] == "List"
     assert attribute["optional"] is True
 
-    documents = yaml.safe_load_all((ROOT / "objects" / "11_l3ls_multi_domain_fabric.yml").read_text(encoding="utf-8"))
+    documents = yaml.safe_load_all(
+        (ROOT / "objects" / "l3ls-multi-domain" / "10_fabric.yml").read_text(encoding="utf-8")
+    )
     fabric_document = next(document for document in documents if document["spec"]["kind"] == "NetworkFabric")
     fabric = next(item for item in fabric_document["spec"]["data"] if item.get("name") == "Fabric-L3LS-Multi-Domain")
-    assert fabric["avd_catalogs_filters"] == ["VerifyInterfaceDiscards", "VerifyLoggingErrors"]
+    assert fabric["avd_catalogs_filters"] == [
+        "VerifyInterfaceDiscards",
+        "VerifyLoggingErrors",
+        "VerifyRunningConfigDiffs",
+    ]
 
 
 def test_infrahub_inventory_is_main_only_and_exposes_anta_fields() -> None:

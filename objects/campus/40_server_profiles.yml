@@ -1,0 +1,10 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: ProfileDcimInterface
+  data:
+    - profile_name: profile-campus-endpoint
+      role: server
+      mtu: 9000
+      untagged_vlan: Campus-Data

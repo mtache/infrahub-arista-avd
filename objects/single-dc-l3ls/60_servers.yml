@@ -18,15 +18,15 @@ spec:
     - name: "sdc-l3ls-server1"
       status: "provisioning"
       rack: "SDC_L3LS_BORDER"
-      object_template: "compute-server-dual"
+      object_template: "sdc-l3ls-compute-server-dual"
       member_of_groups: ["servers"]
     - name: "sdc-l3ls-server2"
       status: "provisioning"
       rack: "SDC_L3LS_ACCESS"
-      object_template: "compute-server-single"
+      object_template: "sdc-l3ls-compute-server-single"
       member_of_groups: ["servers"]
     - name: "sdc-l3ls-gpu1"
       status: "provisioning"
       rack: "SDC_L3LS_ACCESS"
-      object_template: "gpu-server-single"
+      object_template: "sdc-l3ls-gpu-server-single"
       member_of_groups: ["servers"]

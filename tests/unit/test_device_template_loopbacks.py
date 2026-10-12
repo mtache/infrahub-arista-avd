@@ -27,7 +27,7 @@ def test_seeded_loopback0_templates_are_virtual_not_physical() -> None:
 
     # Discovered rather than hardcoded: seed files get renamed and consolidated,
     # and a stale path list silently stops checking the templates it named.
-    for path in sorted(_OBJECTS_DIR.glob("*.yml")):
+    for path in sorted(_OBJECTS_DIR.rglob("*.yml")):
         for doc in _documents(path):
             if doc.get("spec", {}).get("kind") != "TemplateDcimDevice":
                 continue

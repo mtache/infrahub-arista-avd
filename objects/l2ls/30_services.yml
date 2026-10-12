@@ -1,0 +1,69 @@
+---
+# ============================================================================
+# L2 services for Fabric-L2LS - mirrors the AVD "l2ls-fabric" example exactly:
+# tenant MY_FABRIC with three pure-Layer-2 VLANs (BLUE-NET/GREEN-NET/ORANGE-NET)
+# scoped to leaf pairs by AVD tag (RACK1 = blue+green, RACK2 = blue+orange).
+# Overlay-free: the tenant has NO mac_vrf_vni_base, so no VNI/VXLAN/EVPN is
+# derived (l2spine/l2leaf are not VTEPs). Schema-first: no escape hatch.
+# ============================================================================
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: IpamL2Domain
+  data:
+    - name: Fabric-L2LS-L2Domain
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: IpamVLAN
+  data:
+    - name: BLUE-NET
+      vlan_id: 10
+      status: active
+      role: user
+      l2domain: Fabric-L2LS-L2Domain
+    - name: GREEN-NET
+      vlan_id: 20
+      status: active
+      role: user
+      l2domain: Fabric-L2LS-L2Domain
+    - name: ORANGE-NET
+      vlan_id: 30
+      status: active
+      role: user
+      l2domain: Fabric-L2LS-L2Domain
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: EvpnTenant
+  data:
+    # Overlay-free tenant: no mac_vrf_vni_base -> pure Layer-2, no VNI/VXLAN.
+    - name: MY_FABRIC
+      fabrics:
+        - "Fabric-L2LS"
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: EvpnL2Vlan
+  data:
+    - name: "BLUE-NET-L2"
+      vlan_id: 10
+      tenant: MY_FABRIC
+      vlan: BLUE-NET
+      avd_tags:
+        - bluezone
+    - name: "GREEN-NET-L2"
+      vlan_id: 20
+      tenant: MY_FABRIC
+      vlan: GREEN-NET
+      avd_tags:
+        - greenzone
+    - name: "ORANGE-NET-L2"
+      vlan_id: 30
+      tenant: MY_FABRIC
+      vlan: ORANGE-NET
+      avd_tags:
+        - orangezone

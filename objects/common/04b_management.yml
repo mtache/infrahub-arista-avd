@@ -38,3 +38,20 @@ spec:
       role: network-admin
       password_type: type7
       password: "nopassword"
+---
+# DNS Servers
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: NetworkDnsServer
+  data:
+    - name: dns-google
+      ip_address: 8.8.8.8/32
+---
+# NTP Servers
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: NetworkNtpServer
+  data:
+    - name: time.google.com

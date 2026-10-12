@@ -6,7 +6,7 @@ from typing import Any
 import yaml
 
 REPO_ROOT = Path(__file__).parents[2]
-OBJECT_FILES = sorted((REPO_ROOT / "objects").glob("*.yml"))
+OBJECT_FILES = sorted((REPO_ROOT / "objects").rglob("*.yml"))
 
 
 def _documents(path: Path) -> list[dict[str, Any]]:
