@@ -75,6 +75,11 @@ jobs:
           echo "publish=true" >> "$GITHUB_OUTPUT"
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
+      - uses: actions/setup-python@v7
+        if: steps.decide.outputs.publish == 'true'
+        with:
+          python-version: "3.14.7"
+
       - uses: astral-sh/setup-uv@v7
         if: steps.decide.outputs.publish == 'true'
 

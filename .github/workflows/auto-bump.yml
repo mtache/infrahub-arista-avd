@@ -69,9 +69,11 @@ jobs:
             exit 1
           fi
 
-      - uses: astral-sh/setup-uv@v7
+      - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.14.7"
+
+      - uses: astral-sh/setup-uv@v7
 
       - name: Install dependencies
         run: uv sync --group dev --frozen

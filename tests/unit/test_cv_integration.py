@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Self, cast
+from unittest.mock import AsyncMock
 
 import pytest
 from infrahub_sdk.exceptions import NodeNotFoundError, SchemaNotFoundError
@@ -1295,7 +1296,7 @@ async def test_deploy_and_build_blocks_inactive_inventory_device_after_successfu
         result.deployed_configs.extend(configs)
 
     async def finalize_workspace(*args: Any, **kwargs: Any) -> None:
-        return None
+        kwargs["workspace"].state = "built"
 
     async def track_workspace(
         ws_id: str,
@@ -1344,6 +1345,67 @@ async def test_deploy_and_build_blocks_inactive_inventory_device_after_successfu
     assert any(log["message"] == "Devices with validated configurations: leaf-1" for log in check.logs)
     assert not any("Deployed" in log["message"] for log in check.logs)
     assert not any("Devices with configs deployed" in log["message"] for log in check.logs)
+
+
+@pytest.mark.parametrize(
+    ("state", "synchronization_required", "build_error", "success"),
+    [
+        ("built", False, False, True),
+        ("pending", True, False, False),
+        ("pending", False, False, False),
+        ("build failed", False, True, False),
+    ],
+    ids=["built", "synchronization-required", "incomplete", "build-failed"],
+)
+async def test_workspace_finalization_requires_completed_build(
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+    synchronization_required: bool,
+    build_error: bool,
+    success: bool,
+) -> None:
+    check = CVConfigValidationCheck(branch="cv-check-test", client=cast("Any", SimpleNamespace()))
+    cv_client = AsyncMock()
+    track_workspace = AsyncMock()
+
+    async def finalize_workspace(*, workspace: Any, **kwargs: Any) -> None:
+        workspace.state = state
+        workspace.synchronization_required = synchronization_required
+        if build_error:
+            raise cv_config_check.CVClientException("Workspace build failed")
+
+    monkeypatch.setattr(cv_config_check, "CVClient", lambda **_kwargs: cv_client)
+    monkeypatch.setattr(check, "_ensure_workspace_pending", AsyncMock())
+    monkeypatch.setattr(cv_config_check, "verify_devices_on_cv", AsyncMock())
+    monkeypatch.setattr(cv_config_check, "deploy_configs_to_cv", AsyncMock())
+    monkeypatch.setattr(cv_config_check, "finalize_workspace_on_cv", finalize_workspace)
+    monkeypatch.setattr(check, "_track_workspace", track_workspace)
+
+    await check._deploy_and_build(
+        cv_config=SimpleNamespace(
+            servers=["cv.example.com"],
+            token=None,
+            username=None,
+            password=None,
+            verify_certs=True,
+            proxy_host=None,
+            proxy_port=None,
+            proxy_username=None,
+            proxy_password=None,
+        ),
+        ws_id="ws-1",
+        ws_name="Workspace",
+        ws_description="description",
+        proposed_change_id="pc-1",
+        eos_configs=[],
+        fabric_name="Fabric-DC1",
+        fabric_id="fabric-1",
+        inventory_devices=[],
+    )
+
+    assert track_workspace.await_args.args[4] == ("built" if success else "abandoned")
+    assert bool(check.errors) is not success
+    assert any("workspace built successfully" in log["message"] for log in check.logs) is success
 
 
 def test_check_does_not_submit_or_register_lifecycle_hooks() -> None:

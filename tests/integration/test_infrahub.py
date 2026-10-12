@@ -1,10 +1,14 @@
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
-from infrahub_sdk import InfrahubClient
 from infrahub_sdk.protocols import CoreGenericRepository
 from infrahub_sdk.testing.docker import TestInfrahubDockerClient
 from infrahub_sdk.testing.repository import GitRepo
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from infrahub_sdk import InfrahubClient
 
 
 class TestInfrahub(TestInfrahubDockerClient):

@@ -1,14 +1,18 @@
 import os
 import secrets
 import stat
-from pathlib import Path
+from typing import TYPE_CHECKING
 from uuid import UUID
 
-import pytest
 from dotenv import dotenv_values
 from invoke import Context
 
 import tasks
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    import pytest
 
 SECRET_NAMES = {
     "INFRAHUB_INITIAL_ADMIN_PASSWORD",

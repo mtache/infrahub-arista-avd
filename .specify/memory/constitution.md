@@ -213,11 +213,11 @@ breaks discovery and makes cross-references expensive to maintain.
 
 ## Technology Stack & Constraints
 
-- **Language**: Python >=3.11, <3.14.
+- **Language**: Python >=3.14, <3.15.
 - **Platform**: Infrahub with Neo4j, PostgreSQL, Redis, and RabbitMQ.
 - **Infrahub image**: Build and local-stack workflows target
   `INFRAHUB_BASE_VERSION=1.10.10` unless a feature explicitly plans an upgrade.
-- **Core dependencies**: `pyavd>=6.3.0,<6.4.0`, `httpx>=0.28.1`, and
+- **Core dependencies**: `pyavd>=6.4.0,<6.5.0`, `httpx>=0.28.1`, and
   `streamlit-flow-component>=1.6.1`.
 - **Development dependencies**: `infrahub-sdk` with the `all` extra at
   version >=1.19.0,

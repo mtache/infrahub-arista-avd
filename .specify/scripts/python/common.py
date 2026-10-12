@@ -84,7 +84,7 @@ def read_feature_json_feature_directory(repo_root: Path) -> str:
         return ""
     try:
         data = json.loads(feature_json.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+    except OSError, UnicodeError, json.JSONDecodeError:
         return ""
     value = data.get("feature_directory") if isinstance(data, dict) else None
     return value if isinstance(value, str) else ""
@@ -254,7 +254,7 @@ def get_invoke_separator(repo_root: Path) -> str:
             entry = settings.get(key)
             if isinstance(entry, dict) and entry.get("invoke_separator") in {".", "-"}:
                 return entry["invoke_separator"]
-    except (OSError, json.JSONDecodeError):
+    except OSError, json.JSONDecodeError:
         pass
     return "."
 

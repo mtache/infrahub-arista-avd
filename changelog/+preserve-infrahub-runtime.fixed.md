@@ -1,0 +1,1 @@
+Preserve the inherited Infrahub interpreter and compatible runtime dependencies when building the solution image. Add isolated image smoke checks and reject incomplete CloudVision workspace builds, including workspaces requiring synchronization.

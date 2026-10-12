@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14.7-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -7,7 +7,9 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md ./
 COPY src/ src/
 
-RUN uv sync --group catalog --no-dev --frozen
+RUN uv sync --group catalog --no-dev --frozen \
+      --python /usr/local/bin/python --no-python-downloads && \
+    uv pip check --python /app/.venv/bin/python
 
 COPY service_catalog/ service_catalog/
 
@@ -15,4 +17,4 @@ EXPOSE 8501
 
 WORKDIR /app/service_catalog
 
-CMD ["uv", "run", "streamlit", "run", "Home.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["uv", "run", "--no-sync", "streamlit", "run", "Home.py", "--server.port=8501", "--server.address=0.0.0.0"]

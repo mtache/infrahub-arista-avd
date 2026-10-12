@@ -4,10 +4,10 @@ version = "0.1.0"
 description = "Arista AVD reference design for Infrahub: models datacenter fabric intent, EVPN services, and per-device AVD data, then renders EOS configurations and documentation through PyAVD."
 authors = [{ name = "OpsMill", email = "info@opsmill.com" }]
 readme = "README.md"
-requires-python = ">=3.11, <3.14"
+requires-python = ">=3.14, <3.15"
 dependencies = [
     "httpx>=0.28.1",
-    "pyavd>=6.3.0,<6.4.0",
+    "pyavd>=6.4.0,<6.5.0",
     "python-dotenv>=1.0.0",
     "streamlit-flow-component>=1.6.1",
 ]
@@ -179,6 +179,13 @@ max-complexity = 17
 
 
 [tool.uv]
+# These packages are shared with the inherited Infrahub 1.11.5 environment.
+# Keep the solution lock compatible with the server's runtime requirements.
+constraint-dependencies = [
+    "pydantic>=2.12,<2.13",
+    "uvicorn>=0.32,<0.33",
+    "python-multipart==0.0.31",
+]
 override-dependencies = [
     "ariadne-codegen>=0.17.1",
     "click>=8.3",

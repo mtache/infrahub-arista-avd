@@ -18,6 +18,23 @@ python: &python
 python_all:
   - *python
 
+images: &images
+  - 'Dockerfile'
+  - 'Dockerfile.catalog'
+  - 'semaphore/Dockerfile'
+  - 'pyproject.toml'
+  - 'uv.lock'
+  - '.python-version'
+  - 'src/**/*.py'
+  - 'ansible/**/*'
+  - 'service_catalog/**/*'
+  - 'scripts/smoke_images.sh'
+  - '.github/workflows/ci.yml'
+  - '.github/file-filters.yml'
+
+images_all:
+  - *images
+
 # Workflow files are excluded: they are linted by their own review, and
 # including them would run the YAML job on every CI change.
 yaml: &yaml
