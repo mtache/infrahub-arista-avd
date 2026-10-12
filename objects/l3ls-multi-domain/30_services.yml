@@ -31,37 +31,7 @@ spec:
 # EVPN Services for the Fabric-L3LS-Multi-Domain fabric
 # Tenant "Arista" with VRF20 routed and stretched services.
 # ============================================================================
-
 # VRF for the Infrahub-AVD dual-DC lab.
-apiVersion: infrahub.app/v1
-kind: Object
-spec:
-  kind: EvpnDomain
-  data:
-    - name: Fabric-L3LS-Multi-Domain-DC1
-      domain_id: "65100:1"
-      fabric: Fabric-L3LS-Multi-Domain
-    - name: Fabric-L3LS-Multi-Domain-DC2
-      domain_id: "65200:1"
-      fabric: Fabric-L3LS-Multi-Domain
-    - name: CORE
-      domain_id: "65000:100"
-      fabric: Fabric-L3LS-Multi-Domain
----
-apiVersion: infrahub.app/v1
-kind: Object
-spec:
-  kind: NetworkPod
-  data:
-    - name: infrahub-dc1
-      index: 1
-      parent: Fabric-L3LS-Multi-Domain
-      evpn_domain: ["Fabric-L3LS-Multi-Domain", "65100:1"]
-    - name: infrahub-dc2
-      index: 2
-      parent: Fabric-L3LS-Multi-Domain
-      evpn_domain: ["Fabric-L3LS-Multi-Domain", "65200:1"]
----
 apiVersion: infrahub.app/v1
 kind: Object
 spec:
