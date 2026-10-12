@@ -1,1 +1,1 @@
-Preserve the inherited Infrahub interpreter and compatible runtime dependencies when building the solution image. Add isolated image smoke checks and reject incomplete CloudVision workspace builds, including workspaces requiring synchronization.
+Align the solution's Python requirements and shared dependencies with the Infrahub image. Keep automatic Python selection when building the solution image and add isolated image smoke checks. Reject incomplete CloudVision workspace builds, including workspaces requiring synchronization.

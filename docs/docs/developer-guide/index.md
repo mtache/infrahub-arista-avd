@@ -29,11 +29,23 @@ and must be run manually by the user before claiming full integration
 compatibility. Generator changes also require idempotence validation. Unit tests
 and image smoke checks do not establish full integration compatibility.
 
-The custom Infrahub image extends the Python environment inherited from
-Infrahub 1.11.5. Its build selects `/.venv/bin/python`, disables interpreter
-downloads, retains existing server packages, and checks imports and dependency
-consistency. The portal uses `python:3.14.7-slim` and starts Streamlit with
-`uv run --no-sync`. Semaphore retains its separate Python and Ansible runtime.
+The custom Infrahub image extends `/.venv` shipped with Infrahub 1.11.5 using
+`uv sync --no-dev --frozen --inexact`, with automatic Python selection. The
+image's `PATH` selects `/.venv/bin/python`, which uses the Python 3.14.7
+interpreter supplied by the image. Keep the solution's Python requirements
+compatible with that interpreter. `--inexact` retains extra packages when
+syncing a compatible existing environment; it cannot retain them if a Python
+mismatch causes `uv` to recreate the environment. Verify imports and dependency
+consistency with the image smoke checks after building.
+
+Infrahub loads Python generators and transforms into its worker process, where
+the solution imports PyAVD directly. Infrahub and PyAVD must therefore share the
+same Python interpreter and compatible dependencies. Installing PyAVD in a
+separate virtual environment does not make it available to those imports. Using
+different Python versions requires a separate process or service.
+
+The portal uses `python:3.14.7-slim` and starts Streamlit with `uv run --no-sync`.
+Semaphore retains its separate Python and Ansible runtime.
 
 Build and check disposable candidate images without starting Compose:
 
