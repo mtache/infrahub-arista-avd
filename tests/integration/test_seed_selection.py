@@ -4,15 +4,20 @@ Run this file explicitly when integration validation is requested. No repository
 or triggers are registered, and no existing shared instance is used.
 """
 
+from __future__ import annotations
+
 import shlex
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from infrahub_sdk import InfrahubClient
 from infrahub_sdk.testing.docker import TestInfrahubDockerClient
 
 from solution_arista_avd.seed_data import select_seed_data
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from infrahub_sdk import InfrahubClient
 
 FABRICS = {
     "campus": "Fabric-Campus",

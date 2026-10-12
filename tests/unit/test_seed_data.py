@@ -1,4 +1,6 @@
-from pathlib import Path
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock
 
 import pytest
@@ -7,6 +9,9 @@ from invoke.exceptions import Exit, UnexpectedExit
 
 import tasks
 from solution_arista_avd.seed_data import select_seed_data
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 @pytest.fixture
