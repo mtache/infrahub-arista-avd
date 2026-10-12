@@ -1,11 +1,14 @@
 import json
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import yaml
 from invoke import Context
-from pytest import MonkeyPatch
 
 import tasks
+
+if TYPE_CHECKING:
+    from pytest import MonkeyPatch
 
 ROOT = Path(__file__).parents[2]
 PLAYBOOK_PATH = ROOT / "ansible" / "test.yml"
@@ -295,16 +298,16 @@ def test_workspace_directories_are_world_writable(monkeypatch: MonkeyPatch, tmp_
     assert workspace.stat().st_mode & 0o777 == 0o777
 
 
-def test_anta_dependencies_are_pinned_to_avd_630() -> None:
+def test_anta_dependencies_are_pinned_to_avd_640() -> None:
     requirements = yaml.safe_load((ROOT / "ansible" / "galaxy-requirements.yml").read_text(encoding="utf-8"))
     versions = {item["name"]: str(item["version"]) for item in requirements["collections"]}
 
     assert versions["opsmill.infrahub"] == "1.9.0"
-    assert versions["arista.avd"] == "6.3.0"
+    assert versions["arista.avd"] == "6.4.0"
     dockerfile = (ROOT / "semaphore" / "Dockerfile").read_text(encoding="utf-8")
     assert "pip3 uninstall --yes ansible" in dockerfile
     assert '"ansible-core==2.19.13"' in dockerfile
-    assert '"pyavd[ansible]==6.3.0"' in dockerfile
+    assert '"pyavd[ansible]==6.4.0"' in dockerfile
     assert "pip3 check" in dockerfile
     assert "ANSIBLE_COLLECTIONS_PATH=/opt/semaphore/collections:/usr/share/ansible/collections" in dockerfile
-    assert "arista.avd:6.3.0" in dockerfile
+    assert "arista.avd:6.4.0" in dockerfile

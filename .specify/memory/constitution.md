@@ -213,17 +213,28 @@ breaks discovery and makes cross-references expensive to maintain.
 
 ## Technology Stack & Constraints
 
-- **Language**: Python >=3.11, <3.14.
+- **Language**: Python >=3.14, <3.15, with 3.14.7 as the default. Python
+  3.11–3.13 are not supported by the solution.
 - **Platform**: Infrahub with Neo4j, PostgreSQL, Redis, and RabbitMQ.
 - **Infrahub image**: Build and local-stack workflows target
-  `INFRAHUB_BASE_VERSION=1.10.10` unless a feature explicitly plans an upgrade.
-- **Core dependencies**: `pyavd>=6.3.0,<6.4.0`, `httpx>=0.28.1`, and
+  `INFRAHUB_BASE_VERSION=1.11.5` unless a feature explicitly plans an upgrade.
+- **Core dependencies**: `pyavd>=6.4.0,<6.5.0`, `httpx>=0.28.1`, and
   `streamlit-flow-component>=1.6.1`.
 - **Development dependencies**: `infrahub-sdk` with the `all` extra at
   version >=1.19.0,
-  `infrahub-testcontainers==1.10.10`, `invoke>=2.2.0`, `pytest>=8.4.1`,
+  `infrahub-testcontainers>=1.11.5,<2`, `invoke>=2.2.0`, `pytest>=8.4.1`,
   `pytest-asyncio>=1.0.0`, `ruff>=0.12.0`, `mypy>=1.17.1`, `rumdl>=0.2.54`,
   and `yamllint>=1.37.1`.
+- **Runtime compatibility**: Infrahub and PyAVD MUST share a compatible Python
+  interpreter because the solution's generators and transforms import PyAVD
+  in the Infrahub worker process. The image uses automatic Python selection
+  with frozen, inexact sync into the inherited `/.venv`. The solution's Python
+  requirements MUST be compatible with the base image. Image smoke checks MUST
+  verify runtime imports, inherited package versions, and dependency consistency.
+  The lock MUST respect Infrahub's Pydantic, Uvicorn, and multipart constraints.
+  The portal uses Python 3.14.7 and starts without dependency synchronization.
+  Semaphore keeps its own Python runtime and `ansible-core==2.19.13`, with
+  PyAVD and the `arista.avd` collection at 6.4.0.
 - **Service portal dependencies**: the `catalog` dependency group owns Streamlit,
   pandas, python-dotenv, and the catalog SDK constraint.
 - **Package manager**: `uv` with `hatchling` build backend for Python, and

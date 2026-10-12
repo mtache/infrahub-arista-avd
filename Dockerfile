@@ -1,7 +1,7 @@
 ARG INFRAHUB_BASE_VERSION=1.11.5
 FROM registry.opsmill.io/opsmill/infrahub:${INFRAHUB_BASE_VERSION}
 
-# Use the system Python environment
+# Extend the Python environment shipped by the Infrahub image.
 ENV UV_PROJECT_ENVIRONMENT="/.venv"
 
 WORKDIR /opt/local
@@ -9,8 +9,9 @@ WORKDIR /opt/local
 COPY pyproject.toml uv.lock README.md ./
 COPY src/ src/
 
-# --no-dev is necessary to avoid installing dev dependencies including a different version of the infrahub-sdk
-# --inexact is necessary to avoid uninstaling the existing infrahub environment
+# --no-dev avoids installing the solution's development SDK over Infrahub's SDK.
+# --inexact retains extra packages when syncing a compatible existing environment.
+# It cannot retain them if a Python mismatch causes uv to recreate /.venv.
 RUN uv sync --no-dev --frozen --inexact
 
 WORKDIR /source

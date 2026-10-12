@@ -335,6 +335,7 @@ class CVConfigValidationCheck(InfrahubCheck):
                     await finalize_workspace_on_cv(
                         workspace=workspace, cv_client=cv_client, devices=devices, warnings=result.warnings
                     )
+                    self._require_built_workspace(workspace)
                 except CVClientException as build_exc:
                     result.failed = True
                     result.errors.append(build_exc)
@@ -360,6 +361,16 @@ class CVConfigValidationCheck(InfrahubCheck):
                     "The workspace build completed, but inactive targeted devices make validation unsafe."
                 )
             )
+
+    @staticmethod
+    def _require_built_workspace(workspace: CVWorkspace) -> None:
+        """Reject finalization that returned without a completed workspace build."""
+        if workspace.synchronization_required:
+            raise CVClientException(
+                "Workspace requires synchronization with the CloudVision mainline; synchronize it and retry validation"
+            )
+        if workspace.state != "built":
+            raise CVClientException(f"Workspace finalization did not complete a build (state: {workspace.state})")
 
     @staticmethod
     def _inactive_cv_device_names(devices: list[CVDevice]) -> list[str]:
@@ -443,7 +454,7 @@ class CVConfigValidationCheck(InfrahubCheck):
                 await self._ensure_workspace_thread(ws_node, proposed_change_id, ws_id, fabric_name, workspace_url)
         except SchemaNotFoundError:
             LOGGER.warning("CloudvisionWorkspace schema not loaded in Infrahub — skipping workspace tracking")
-        except (AttributeError, ValueError, RuntimeError):
+        except AttributeError, ValueError, RuntimeError:
             LOGGER.exception("Failed to track workspace in Infrahub")
 
     async def _ensure_workspace_thread(

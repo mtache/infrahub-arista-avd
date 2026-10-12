@@ -1,4 +1,4 @@
-FROM python:3.12-slim
+FROM python:3.14.7-slim
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
@@ -15,4 +15,4 @@ EXPOSE 8501
 
 WORKDIR /app/service_catalog
 
-CMD ["uv", "run", "streamlit", "run", "Home.py", "--server.port=8501", "--server.address=0.0.0.0"]
+CMD ["uv", "run", "--no-sync", "streamlit", "run", "Home.py", "--server.port=8501", "--server.address=0.0.0.0"]

@@ -750,7 +750,7 @@ async def _submit_workspace(
             resolved=True,
             workspace_url=thread_workspace_url,
         )
-    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+    except AttributeError, KeyError, RuntimeError, TypeError, ValueError:
         _log_outcome_fallback(result)
     return SubmissionResult(
         status="submitted",
@@ -793,7 +793,7 @@ async def _already_submitted(
             resolved=True,
             workspace_url=_thread_workspace_url(record),
         )
-    except (AttributeError, KeyError, RuntimeError, TypeError, ValueError):
+    except AttributeError, KeyError, RuntimeError, TypeError, ValueError:
         _log_outcome_fallback(result)
     return SubmissionResult(
         status="already_submitted",

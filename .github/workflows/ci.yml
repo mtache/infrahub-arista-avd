@@ -21,6 +21,7 @@ permissions:
 
 env:
   UV_FROZEN: "true"
+  UV_PYTHON: "3.14.7"
 
 jobs:
   # Classifies the changed files so each job below runs only when it can be
@@ -34,6 +35,7 @@ jobs:
       python: ${{ steps.changes.outputs.python_all }}
       yaml: ${{ steps.changes.outputs.yaml_all }}
       markdown: ${{ steps.changes.outputs.markdown_all }}
+      images: ${{ steps.changes.outputs.images_all }}
     steps:
       - uses: actions/checkout@v7
 
@@ -44,6 +46,22 @@ jobs:
           token: ${{ github.token }}
           filters: .github/file-filters.yml
 
+  image-smoke:
+    name: Container image smoke checks
+    if: needs.files-changed.outputs.images == 'true'
+    needs: ["files-changed"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build candidate images
+        run: |
+          docker build --build-arg INFRAHUB_BASE_VERSION=1.11.5 -t avd-infrahub-smoke .
+          docker build -f Dockerfile.catalog -t avd-catalog-smoke .
+          docker build -t avd-semaphore-smoke semaphore
+      - name: Check isolated images
+        run: bash scripts/smoke_images.sh avd-infrahub-smoke avd-catalog-smoke avd-semaphore-smoke
+
   lint:
     name: Lint (ruff, yamllint, mypy)
     # yamllint covers YAML too, so this job runs when either category changed.
@@ -53,6 +71,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14.7"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
@@ -90,6 +113,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14.7"
+
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
         with:
@@ -125,6 +153,11 @@ jobs:
           node-version-file: ".node-version"
           cache: "pnpm"
           cache-dependency-path: docs/pnpm-lock.yaml
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14.7"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
@@ -172,6 +205,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14.7"
+
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
         with:
@@ -191,6 +229,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14.7"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1
@@ -214,6 +257,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.14.7"
 
       - name: Install uv
         uses: astral-sh/setup-uv@v10.0.1

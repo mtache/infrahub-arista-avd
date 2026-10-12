@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-python@v7
         with:
-          python-version: "3.13"
+          python-version: "3.14.7"
       - name: Validate release bump label
         env:
           PR_AUTHOR_LOGIN: ${{ github.event.pull_request.user.login }}

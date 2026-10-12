@@ -1,9 +1,9 @@
 """Unit tests for the AVD hostvar generator's tenant/EVPN payload."""
 
 import logging
-from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
 import pytest
@@ -18,6 +18,9 @@ from generators.generate_avd_device_hostvar import (
     apply_lag_adapter_config,
     build_dci_l3_edge_p2p_links,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 
 def _attr(value: object) -> SimpleNamespace:

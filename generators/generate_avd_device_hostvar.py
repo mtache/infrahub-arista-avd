@@ -1480,7 +1480,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         if parent_id:
             try:
                 objects = await self.client.filters(kind=kind, **{filter_name: [parent_id]})
-            except (AttributeError, KeyError):
+            except AttributeError, KeyError:
                 objects = []
 
         if objects:
@@ -1517,7 +1517,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         """
         try:
             tenants = await self.client.filters(kind="EvpnTenant", fabrics__ids=[fabric_id])
-        except (AttributeError, KeyError):
+        except AttributeError, KeyError:
             return []
 
         if not tenants:

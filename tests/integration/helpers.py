@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from typing import TYPE_CHECKING, Any, TypeVar
+from typing import TYPE_CHECKING, Any
 
 from infrahub_sdk.exceptions import GraphQLError
 
@@ -18,8 +18,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from infrahub_sdk import InfrahubClient
-
-T = TypeVar("T")
 
 # --- Generator definition names (from .infrahub.yml `generator_definitions`) ---
 GENERATOR_FABRIC = "generate-fabric"
@@ -92,7 +90,7 @@ def _summarize(value: Any) -> str:
     return text if len(text) <= 200 else f"{text[:200]}..."
 
 
-async def wait_until(
+async def wait_until[T](
     fetch: Callable[[], Awaitable[T]],
     ready: Callable[[T], bool],
     *,
