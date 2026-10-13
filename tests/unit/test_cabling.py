@@ -18,6 +18,7 @@ from solution_arista_avd.cabling import (
     build_rack_cabling_plan,
     connect_interface_maps,
 )
+from solution_arista_avd.sorting import create_reverse_sorted_device_interface_map, create_sorted_device_interface_map
 
 
 def _iface(iface_id: str) -> MagicMock:
@@ -39,6 +40,74 @@ def _device_without_hydrated_index(name: str) -> MagicMock:
     device.index.value = None
     device.name.value = name
     return device
+
+
+def _map_interface(device_name: str, device_id: str, interface_id: str) -> tuple[MagicMock, MagicMock]:
+    device = MagicMock()
+    device.id = device_id
+    device.name.value = device_name
+    interface = MagicMock()
+    interface.id = interface_id
+    interface.name.value = "Ethernet1"
+    interface.device.peer = device
+    return device, interface
+
+
+def test_device_interface_map_order_is_natural_and_independent_of_graphql_order() -> None:
+    device_10, interface_10 = _map_interface("leaf-10", "id-10", "iface-10")
+    device_2, interface_2 = _map_interface("leaf-2", "id-2", "iface-2")
+
+    forward = create_sorted_device_interface_map([interface_10, interface_2])
+    reverse = create_sorted_device_interface_map([interface_2, interface_10])
+
+    assert list(forward) == [device_2, device_10]
+    assert list(reverse) == [device_2, device_10]
+    assert list(forward.values()) == list(reverse.values())
+
+
+def test_device_interface_map_uses_partial_hydration_label_and_stable_id() -> None:
+    device_10 = MagicMock()
+    device_10.id = "device-10"
+    device_10.name = None
+    device_10.display_label = "leaf-10"
+    device_2 = MagicMock()
+    device_2.id = "device-2"
+    device_2.name = None
+    device_2.display_label = "leaf-2"
+
+    interface_10 = MagicMock()
+    interface_10.id = "iface-10"
+    interface_10.name.value = "Ethernet10"
+    interface_10.device.peer = device_10
+    interface_2 = MagicMock()
+    interface_2.id = "iface-2"
+    interface_2.name.value = "Ethernet2"
+    interface_2.device.peer = device_2
+
+    ordered = create_sorted_device_interface_map([interface_10, interface_2])
+
+    assert list(ordered) == [device_2, device_10]
+
+
+def test_device_interface_map_breaks_duplicate_name_ties_by_id() -> None:
+    device_b, interface_b = _map_interface("leaf-1", "device-b", "iface-b")
+    device_a, interface_a = _map_interface("leaf-1", "device-a", "iface-a")
+
+    ordered = create_sorted_device_interface_map([interface_b, interface_a])
+
+    assert list(ordered) == [device_a, device_b]
+
+
+def test_reverse_device_interface_map_preserves_port_ordering() -> None:
+    device, interface_2 = _map_interface("leaf-1", "leaf-id", "iface-2")
+    interface_2.name.value = "Ethernet2"
+    _, interface_10 = _map_interface("leaf-1", "leaf-id", "iface-10")
+    interface_10.device.peer = device
+    interface_10.name.value = "Ethernet10"
+
+    reverse = create_reverse_sorted_device_interface_map([interface_2, interface_10])
+
+    assert next(iter(reverse.values())) == [interface_10, interface_2]
 
 
 def _ids(plan: list[tuple[MagicMock, MagicMock]]) -> list[tuple[str, str]]:
@@ -211,8 +280,8 @@ class TestConnectInterfaceMaps:
         assert dst_fetched_iface.connector is network_link
         assert src_fetched_iface.status.value == "active"
         assert dst_fetched_iface.status.value == "active"
-        src_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
-        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
+        src_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     @pytest.mark.asyncio
     async def test_creates_uplink_with_device_pair_name_and_role_without_medium(self) -> None:
@@ -360,7 +429,7 @@ class TestConnectInterfaceMaps:
         assert src_fetched_iface.connector.id == "manual-link"
         src_fetched_iface.save.assert_not_awaited()
         assert dst_fetched_iface.connector is network_link
-        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
+        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
         assert any("Skipped connector reconciliation" in call.args[0] for call in logger.warning.call_args_list)
 
     @pytest.mark.asyncio
@@ -382,8 +451,8 @@ class TestConnectInterfaceMaps:
 
         assert src_fetched_iface.connector is network_link
         assert dst_fetched_iface.connector is network_link
-        src_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
-        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
+        src_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
 
 def test_parallel_uplink_suffixes_are_stable_and_naturally_ordered() -> None:

@@ -373,6 +373,8 @@ class TestDualHomedCabling:
         assert create_calls[2].kwargs["evpn_ethernet_segment"] is True
         assert leaf1_iface.lag == {"id": "leaf1-po-id"}
         assert leaf2_iface.lag == {"id": "leaf2-po-id"}
+        for interface in (server_iface1, server_iface2, leaf1_iface, leaf2_iface):
+            interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
 
 class TestVlanAssignment:
@@ -422,6 +424,7 @@ class TestVlanAssignment:
         await gen._assign_vlans(cabling_plan, server_ifaces)
 
         mock_leaf_iface.tagged_vlan.extend.assert_called_once_with(["vlan-300", "vlan-400"])
+        mock_leaf_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     @pytest.mark.asyncio
     async def test_untagged_vlan_copied_to_leaf(self) -> None:
@@ -449,6 +452,7 @@ class TestVlanAssignment:
 
         # `untagged_vlan` is cardinality one, so it is assigned — not added to.
         assert mock_leaf_iface.untagged_vlan == {"id": "vlan-100"}
+        mock_leaf_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     @pytest.mark.asyncio
     async def test_dual_homed_vlans_are_assigned_to_bond_and_switch_lags(self) -> None:
@@ -518,7 +522,7 @@ class TestVlanAssignment:
 
         server_member.tagged_vlan.remove.assert_called_once_with("vlan-300")
         server_member.untagged_vlan.fetch.assert_not_awaited()
-        server_member.save.assert_awaited_once_with(allow_upsert=True)
+        server_member.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     @pytest.mark.asyncio
     async def test_apply_untagged_vlan_assigns_without_fetching(self) -> None:
@@ -537,7 +541,7 @@ class TestVlanAssignment:
 
         fetch.assert_not_awaited()
         assert target.untagged_vlan == {"id": "vlan-100"}
-        target.save.assert_awaited_once_with(allow_upsert=True)
+        target.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
 
 class TestNoLeafSwitches:

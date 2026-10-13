@@ -1,0 +1,1 @@
+Keep generated cabling and structured configuration stable across generator reruns by ordering device interfaces consistently and preserving interface ownership across generators. The MultiPod-B server interface profile now also stays within Infrahub's 32-character limit.

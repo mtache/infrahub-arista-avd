@@ -308,7 +308,7 @@ async def _connect_fetched_interface_if_missing(
     # SDK accepts protocol kinds at runtime; assigning a node to a relationship is the SDK pattern.
     iface.connector = network_link  # type: ignore[assignment]
     iface.status.value = "active"
-    await iface.save(allow_upsert=True)
+    await iface.save(allow_upsert=True, update_group_context=False)
     logger.info("Populated missing connector on %s", iface.display_label)
     return True
 
