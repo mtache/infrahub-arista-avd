@@ -86,6 +86,7 @@ POLL_INTERVAL = 10
 READ_TIMEOUT = 300
 MAX_READ_RETRIES = 3
 RETRYABLE_READ_STATUS_CODES = frozenset({429, 502, 503, 504})
+_NO_OBSERVATION = object()
 
 
 def _summarize(value: Any) -> str:
@@ -106,8 +107,7 @@ def _summarize(value: Any) -> str:
     return text if len(text) <= 200 else f"{text[:200]}..."
 
 
-def _retry_after_seconds(error: httpx.HTTPStatusError) -> float | None:
-    value = error.response.headers.get("Retry-After")
+def _parse_retry_after(value: str | None) -> float | None:
     if value is None:
         return None
     try:
@@ -122,16 +122,88 @@ def _retry_after_seconds(error: httpx.HTTPStatusError) -> float | None:
         return max((retry_at - datetime.now(UTC)).total_seconds(), 0.0)
 
 
-async def _read_with_retries[T](fetch: Callable[[], Awaitable[T]], *, deadline: float) -> T:
-    """Bound one poll read and retry only transient HTTP statuses."""
+def _nested_mappings(value: Any) -> list[dict[str, Any]]:
+    """Return mappings nested in one JSON-like GraphQL error payload."""
+    if isinstance(value, dict):
+        return [value, *(mapping for child in value.values() for mapping in _nested_mappings(child))]
+    if isinstance(value, list):
+        return [mapping for child in value for mapping in _nested_mappings(child)]
+    return []
+
+
+def _graphql_error_status(error: GraphQLError) -> int | None:
+    """Read an HTTP status or standard rate-limit code from GraphQL error metadata."""
+    for mapping in _nested_mappings(error.errors):
+        for key, value in mapping.items():
+            normalized_key = re.sub(r"[^a-z]", "", str(key).casefold())
+            if normalized_key in {"status", "statuscode", "httpstatus", "httpstatuscode"}:
+                try:
+                    return int(value)
+                except TypeError, ValueError:
+                    continue
+            if normalized_key in {"code", "errorcode"}:
+                if isinstance(value, int):
+                    return value
+                if isinstance(value, str):
+                    normalized_code = value.upper().replace("-", "_")
+                    if normalized_code in {"TOO_MANY_REQUESTS", "RATE_LIMITED", "THROTTLED"}:
+                        return 429
+                    match = re.fullmatch(r"(?:HTTP_?)?(429|502|503|504)", normalized_code)
+                    if match:
+                        return int(match.group(1))
+
+        message = mapping.get("message")
+        if isinstance(message, str):
+            if "too many requests" in message.casefold():
+                return 429
+            match = re.search(r"(?<!\d)(429|502|503|504)(?!\d)", message)
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def _graphql_retry_after(error: GraphQLError) -> str | None:
+    for mapping in _nested_mappings(error.errors):
+        for key, value in mapping.items():
+            normalized_key = re.sub(r"[^a-z]", "", str(key).casefold())
+            if normalized_key in {"retryafter", "retryafterseconds"} and value is not None:
+                return str(value)
+    return None
+
+
+def _transient_status(error: httpx.HTTPStatusError | GraphQLError) -> int | None:
+    if isinstance(error, httpx.HTTPStatusError):
+        return error.response.status_code
+    return _graphql_error_status(error)
+
+
+def _retry_after_seconds(error: httpx.HTTPStatusError | GraphQLError) -> float | None:
+    value = (
+        error.response.headers.get("Retry-After")
+        if isinstance(error, httpx.HTTPStatusError)
+        else _graphql_retry_after(error)
+    )
+    return _parse_retry_after(value)
+
+
+def _wait_diagnostic(last_observed: Any, last_read_error: BaseException | None) -> str:
+    observation = "no successful read" if last_observed is _NO_OBSERVATION else _summarize(last_observed)
+    details = [f"last observed: {observation}"]
+    if last_read_error is not None:
+        details.append(f"last read error: {_summarize(last_read_error)}")
+    return "; ".join(details)
+
+
+async def _retry_transient_request[T](fetch: Callable[[], Awaitable[T]], *, deadline: float) -> T:
+    """Bound one API request and retry only 429, 502, 503, or 504 responses."""
     for attempt in range(MAX_READ_RETRIES + 1):
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError("poll deadline expired before the next read")
         try:
             return await asyncio.wait_for(fetch(), timeout=min(READ_TIMEOUT, remaining))
-        except httpx.HTTPStatusError as exc:
-            if exc.response.status_code not in RETRYABLE_READ_STATUS_CODES or attempt == MAX_READ_RETRIES:
+        except (httpx.HTTPStatusError, GraphQLError) as exc:
+            if _transient_status(exc) not in RETRYABLE_READ_STATUS_CODES or attempt == MAX_READ_RETRIES:
                 raise
             delay = _retry_after_seconds(exc)
             if delay is None:
@@ -143,6 +215,11 @@ async def _read_with_retries[T](fetch: Callable[[], Awaitable[T]], *, deadline: 
                 ) from exc
             await asyncio.sleep(delay)
     raise AssertionError("unreachable retry state")
+
+
+async def _read_with_retries[T](fetch: Callable[[], Awaitable[T]], *, deadline: float) -> T:
+    """Bound a poll read and retry transient HTTP or GraphQL rate-limit errors."""
+    return await _retry_transient_request(fetch, deadline=deadline)
 
 
 async def wait_until[T](
@@ -160,23 +237,35 @@ async def wait_until[T](
     diagnosable without a rerun (FR-015 / FR-019).
     """
     deadline = time.monotonic() + timeout
-    last: Any = None
+    last_observed: Any = _NO_OBSERVATION
+    last_read_error: BaseException | None = None
     while True:
-        try:
-            last = await _read_with_retries(fetch, deadline=deadline)
-        except GraphQLError as exc:
-            last = exc
-        except TimeoutError as exc:
-            last = exc
-            if time.monotonic() < deadline:
-                raise AssertionError(f"{describe}: read timed out before the poll deadline: {exc}") from exc
-        else:
-            if ready(last):
-                return last
         remaining = deadline - time.monotonic()
         if remaining <= 0:
-            msg = f"{describe}: timed out after {timeout}s; last observed: {_summarize(last)}"
-            raise AssertionError(msg)
+            raise AssertionError(
+                f"{describe}: timed out after {timeout}s; {_wait_diagnostic(last_observed, last_read_error)}"
+            )
+        try:
+            observed = await _read_with_retries(fetch, deadline=deadline)
+        except GraphQLError as exc:
+            last_read_error = exc
+        except TimeoutError as exc:
+            last_read_error = exc
+            if time.monotonic() < deadline:
+                raise AssertionError(
+                    f"{describe}: read timed out before the poll deadline; "
+                    f"{_wait_diagnostic(last_observed, last_read_error)}"
+                ) from exc
+        else:
+            last_observed = observed
+            last_read_error = None
+            if ready(observed):
+                return observed
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                f"{describe}: timed out after {timeout}s; {_wait_diagnostic(last_observed, last_read_error)}"
+            )
         await asyncio.sleep(min(interval, remaining))
 
 
@@ -190,24 +279,36 @@ async def wait_until_stable[T](
 ) -> T:
     """Wait for two identical ready observations, with one shared deadline."""
     deadline = time.monotonic() + timeout
-    last: Any = None
+    last_observed: Any = _NO_OBSERVATION
+    last_read_error: BaseException | None = None
     previous: T | None = None
     while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise AssertionError(
+                f"{describe}: timed out after {timeout}s without two identical ready observations; "
+                f"{_wait_diagnostic(last_observed, last_read_error)}"
+            )
         try:
-            last = await _read_with_retries(fetch, deadline=deadline)
+            observed = await _read_with_retries(fetch, deadline=deadline)
         except GraphQLError as exc:
-            last = exc
+            last_read_error = exc
             previous = None
         except TimeoutError as exc:
-            last = exc
+            last_read_error = exc
             if time.monotonic() < deadline:
-                raise AssertionError(f"{describe}: read timed out before the poll deadline: {exc}") from exc
+                raise AssertionError(
+                    f"{describe}: read timed out before the poll deadline; "
+                    f"{_wait_diagnostic(last_observed, last_read_error)}"
+                ) from exc
             previous = None
         else:
-            if ready(last):
-                if previous is not None and last == previous:
-                    return last
-                previous = last
+            last_observed = observed
+            last_read_error = None
+            if ready(observed):
+                if previous is not None and observed == previous:
+                    return observed
+                previous = observed
             else:
                 previous = None
 
@@ -215,7 +316,7 @@ async def wait_until_stable[T](
         if remaining <= 0:
             raise AssertionError(
                 f"{describe}: timed out after {timeout}s without two identical ready observations; "
-                f"last observed: {_summarize(last)}"
+                f"{_wait_diagnostic(last_observed, last_read_error)}"
             )
         await asyncio.sleep(min(interval, remaining))
 

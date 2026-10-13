@@ -6,9 +6,11 @@ from unittest.mock import AsyncMock
 
 import httpx
 import pytest
+from infrahub_sdk.exceptions import GraphQLError
 
 from tests.integration.helpers import (
     _read_with_retries,
+    _retry_transient_request,
     dci_allocation_mismatches,
     dci_link_matches_endpoints,
     device_design_mismatches,
@@ -23,6 +25,7 @@ from tests.integration.test_e2e_pipeline import (
     _fetch_ready_artifact_contents_by_target,
     _rack_snapshot_diff,
     _run_generator_for_nodes,
+    _trigger_artifact_generation,
 )
 
 
@@ -43,6 +46,37 @@ async def test_read_retries_respect_retry_after(monkeypatch: pytest.MonkeyPatch)
     assert result == "ready"
     assert fetch.await_count == 2
     sleep.assert_awaited_once_with(7.0)
+
+
+@pytest.mark.asyncio
+async def test_graphql_rate_limit_retries_respect_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
+    error = GraphQLError(
+        errors=[{"message": "Too Many Requests", "extensions": {"code": "TOO_MANY_REQUESTS", "retryAfter": "7"}}]
+    )
+    fetch = AsyncMock(side_effect=[error, "ready"])
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.integration.helpers.asyncio.sleep", sleep)
+
+    result = await _retry_transient_request(fetch, deadline=time.monotonic() + 60)
+
+    assert result == "ready"
+    assert fetch.await_count == 2
+    sleep.assert_awaited_once_with(7.0)
+
+
+@pytest.mark.asyncio
+async def test_artifact_generation_retries_http_429(monkeypatch: pytest.MonkeyPatch) -> None:
+    request = httpx.Request("POST", "https://infrahub.test/api/artifact/generate/artifact-id")
+    throttled = httpx.Response(429, headers={"Retry-After": "3"}, request=request)
+    accepted = httpx.Response(202, request=request)
+    client = SimpleNamespace(address="https://infrahub.test", _post=AsyncMock(side_effect=[throttled, accepted]))
+    sleep = AsyncMock()
+    monkeypatch.setattr("tests.integration.helpers.asyncio.sleep", sleep)
+
+    await _trigger_artifact_generation(client, "artifact-id", "e2e-pipeline", ["device-id"])
+
+    assert client._post.await_count == 2
+    sleep.assert_awaited_once_with(3.0)
 
 
 @pytest.mark.asyncio
@@ -97,7 +131,7 @@ async def test_wait_until_stable_requires_two_identical_ready_observations(monke
 
 @pytest.mark.asyncio
 async def test_wait_until_bounds_poll_sleep_by_remaining_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
-    monotonic = iter([100.0, 100.0, 101.0])
+    monotonic = iter([100.0, 100.0, 100.0, 100.5, 101.0])
     monkeypatch.setattr(
         "tests.integration.helpers.time",
         SimpleNamespace(monotonic=lambda: next(monotonic)),
@@ -116,6 +150,54 @@ async def test_wait_until_bounds_poll_sleep_by_remaining_deadline(monkeypatch: p
         )
 
     sleep.assert_awaited_once_with(1.0)
+
+
+@pytest.mark.parametrize("require_stability", [False, True])
+@pytest.mark.asyncio
+async def test_wait_timeout_preserves_last_success_after_a_later_read_error(
+    monkeypatch: pytest.MonkeyPatch,
+    require_stability: bool,
+) -> None:
+    now = [0.0]
+    monkeypatch.setattr(
+        "tests.integration.helpers.time",
+        SimpleNamespace(monotonic=lambda: now[0]),
+    )
+
+    async def advance_clock(seconds: float) -> None:
+        now[0] += seconds
+
+    monkeypatch.setattr("tests.integration.helpers.asyncio.sleep", advance_clock)
+    fetch = AsyncMock(
+        side_effect=[
+            {"checksum": "last-good-snapshot"},
+            GraphQLError(errors=[{"message": "temporary GraphQL read error"}]),
+        ]
+    )
+
+    with pytest.raises(AssertionError) as exc_info:
+        if require_stability:
+            await wait_until_stable(
+                fetch,
+                ready=lambda _: True,
+                timeout=1,
+                interval=0.5,
+                describe="stable test snapshot",
+            )
+        else:
+            await wait_until(
+                fetch,
+                ready=lambda _: False,
+                timeout=1,
+                interval=0.5,
+                describe="test snapshot",
+            )
+
+    message = str(exc_info.value)
+    assert "last observed: {'checksum': 'last-good-snapshot'}" in message
+    assert "last read error:" in message
+    assert "temporary GraphQL read error" in message
+    assert fetch.await_count == 2
 
 
 def _design(role: str, quantity: int, parent_name: str) -> SimpleNamespace:
