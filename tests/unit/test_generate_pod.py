@@ -94,6 +94,45 @@ def _spine_interfaces() -> list[SimpleNamespace]:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("underlay", "spine_role", "expected_asn_pool"),
+    [
+        ("none", "l2spine", None),
+        ("ospf", "l3spine", "fabric-asn-pool"),
+        ("ospf", "l2spine", "fabric-asn-pool"),
+        ("ebgp", "spine", None),
+    ],
+)
+async def test_create_spine_switches_omits_asn_only_for_ebgp_or_pure_l2_spines(
+    underlay: str, spine_role: str, expected_asn_pool: str | None
+) -> None:
+    gen = _make_mlag_generator()
+    gen.underlay_routing_protocol = underlay
+    gen.spine_role = spine_role
+    gen.amount_of_spines = 2
+    gen.pod_name = "l2ls-pod1"
+    gen.pod_spine_switch_template = "spine-template"
+    gen.pod_id = "pod-1"
+    gen.fabric_id = "fabric-1"
+    gen.loopback_pool = None
+    gen.vtep_loopback_pool = None
+    gen.asn_pool = "fabric-asn-pool"
+    gen.node_id_pool = None
+    gen.mgmt_pool = None
+    gen.spine_switches = []
+    gen.create_avd_device = AsyncMock(  # type: ignore[method-assign]
+        side_effect=[_spine("spine-1", "spine-1"), _spine("spine-2", "spine-2")]
+    )
+
+    await gen.create_spine_switches()
+
+    assert [call.kwargs["asn_pool"] for call in gen.create_avd_device.await_args_list] == [
+        expected_asn_pool,
+        expected_asn_pool,
+    ]
+
+
+@pytest.mark.asyncio
 async def test_create_spine_mlag_pair_carves_super_spine_ports() -> None:
     """An l2spine pod forms one MLAG domain and carves the peer-link from the
     highest free super-spine-facing ports (never the leaf-facing downlinks)."""

@@ -163,7 +163,12 @@ class PodGenerator(InfrahubGenerator, GeneratorMixin):
     async def create_spine_switches(self) -> None:
         """Create the spine switches"""
 
-        device_asn_pool = None if self.underlay_routing_protocol == "ebgp" else self.asn_pool
+        device_asn_pool = (
+            None
+            if self.underlay_routing_protocol == "ebgp"
+            or (self.underlay_routing_protocol == "none" and self.spine_role == "l2spine")
+            else self.asn_pool
+        )
         for idx in range(1, self.amount_of_spines + 1):
             device = await self.create_avd_device(
                 name=f"spine-{self.pod_name}-{idx}",
