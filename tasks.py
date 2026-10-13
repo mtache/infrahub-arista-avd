@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import secrets
 import shlex
 import shutil
@@ -97,8 +98,129 @@ def _initialize_secrets(env_path: Path) -> tuple[str, ...]:
 
 
 def _compose_lifecycle_environment() -> dict[str, str]:
-    """Satisfy Compose interpolation for commands that never consume credentials."""
-    return {name: os.environ.get(name) or COMPOSE_LIFECYCLE_PLACEHOLDER for name in COMPOSE_REQUIRED_SECRET_NAMES}
+    """Supply credentials and the local container identity to Compose commands."""
+    environment = {
+        name: os.environ.get(name) or COMPOSE_LIFECYCLE_PLACEHOLDER for name in COMPOSE_REQUIRED_SECRET_NAMES
+    }
+    environment.update(_semaphore_identity_environment())
+    return environment
+
+
+def _semaphore_identity() -> tuple[int, int]:
+    """Resolve Semaphore's container identity from exported values, .env, or the caller."""
+    file_values = dotenv_values(ENV_FILE_PATH) if ENV_FILE_PATH.exists() else {}
+    identity: list[int] = []
+
+    for variable, fallback in (("SEMAPHORE_UID", os.getuid()), ("SEMAPHORE_GID", os.getgid())):
+        if variable in os.environ:
+            raw_value: str | None = os.environ[variable]
+        elif variable in file_values:
+            raw_value = file_values[variable]
+        else:
+            identity.append(fallback)
+            continue
+
+        if raw_value is None or re.fullmatch(r"[0-9]+", raw_value) is None:
+            raise Exit(f"{variable} must be an integer greater than zero.")
+        value = int(raw_value)
+        if not 0 < value <= 2_147_483_647:
+            raise Exit(f"{variable} must be between 1 and 2147483647.")
+        identity.append(value)
+
+    return identity[0], identity[1]
+
+
+def _semaphore_identity_environment() -> dict[str, str]:
+    """Return the validated container UID and GID for Docker Compose."""
+    uid, gid = _semaphore_identity()
+    return {"SEMAPHORE_UID": str(uid), "SEMAPHORE_GID": str(gid)}
+
+
+def _assert_semaphore_storage_compatible(context: Context) -> None:
+    """Refuse replacing an existing container before its state is migrated to volumes."""
+    environment = _compose_lifecycle_environment()
+    with context.cd(MAIN_DIRECTORY_PATH):
+        result = context.run(
+            f"docker compose {COMPOSE_FILES} ps --all --quiet semaphore",
+            hide=True,
+            warn=True,
+            env=environment,
+        )
+        if not result or not result.ok:
+            raise Exit("Could not inspect Semaphore before starting it; check Docker and Compose.")
+
+        container_ids = result.stdout.split()
+        for container_id in container_ids:
+            if re.fullmatch(r"[0-9a-f]{12,64}", container_id) is None:
+                raise Exit("Compose returned an invalid Semaphore container ID; refusing to start.")
+
+            inspected = context.run(
+                f"docker inspect --format '{{{{json .}}}}' {container_id}",
+                hide=True,
+                warn=True,
+                env=environment,
+            )
+            if not inspected or not inspected.ok:
+                raise Exit("Could not inspect Semaphore storage; refusing to start.")
+
+            try:
+                container = json.loads(inspected.stdout)
+            except json.JSONDecodeError as error:
+                raise Exit("Could not read Semaphore's stored identity and mounts; refusing to start.") from error
+
+            if isinstance(container, list) and len(container) == 1:
+                container = container[0]
+            if not isinstance(container, dict):
+                raise Exit("Could not read Semaphore's stored identity and mounts; refusing to start.")
+
+            try:
+                config = container["Config"]
+                mounts = container["Mounts"]
+                uid, gid = int(environment["SEMAPHORE_UID"]), int(environment["SEMAPHORE_GID"])
+                config_is_persistent = any(
+                    mount.get("Type") == "volume"
+                    and mount.get("Destination") == "/etc/semaphore"
+                    and str(mount.get("Name", "")).endswith("_semaphore_config")
+                    for mount in mounts
+                )
+                data_is_persistent = any(
+                    mount.get("Type") == "volume"
+                    and mount.get("Destination") == "/var/lib/semaphore"
+                    and str(mount.get("Name", "")).endswith("_semaphore_data")
+                    for mount in mounts
+                )
+                identity_matches = config.get("User") == f"{uid}:{gid}"
+            except (KeyError, TypeError, ValueError) as error:
+                raise Exit("Could not read Semaphore's stored identity and mounts; refusing to start.") from error
+
+            if not (config_is_persistent and data_is_persistent and identity_matches):
+                short_id = container_id[:12]
+                raise Exit(
+                    f"Semaphore container {short_id} uses the previous storage or UID/GID configuration. "
+                    "Follow the Semaphore migration instructions before running 'uv run invoke start' "
+                    "or 'uv run invoke init-semaphore'."
+                )
+
+
+def _ensure_host_owned_directory(path: Path, purpose: str) -> Path:
+    """Create a Semaphore bind-mount source owned by this host user with private defaults."""
+    uid, _ = _semaphore_identity()
+    if uid != os.getuid():
+        raise Exit(
+            f"SEMAPHORE_UID is {uid}, but {purpose} must be owned by the current host user "
+            f"({os.getuid()}) so bind-mounted files remain accessible."
+        )
+    if path.is_symlink():
+        raise Exit(f"{purpose} path {path} must not be a symbolic link.")
+
+    path.mkdir(parents=True, exist_ok=True)
+    if path.is_symlink() or path.stat().st_uid != uid:
+        owner = path.stat().st_uid if not path.is_symlink() else "symlink"
+        raise Exit(f"{purpose} path {path} is owned by {owner}; expected UID {uid}.")
+
+    path.chmod(0o755)
+    print(f"{purpose} {path} ready (owner UID {uid}, mode 0755).")
+    return path
 
 
 @task(name="init-secrets")
@@ -121,7 +243,7 @@ def build(ctx: Context, cache: bool = True) -> None:
     if not cache:
         compose_cmd += " --no-cache"
     with ctx.cd(MAIN_DIRECTORY_PATH):
-        ctx.run(compose_cmd, pty=True)
+        ctx.run(compose_cmd, pty=True, env=_semaphore_identity_environment())
 
 
 @task
@@ -300,16 +422,15 @@ def ensure_clab_staging_dir() -> Path:
     deploy_clab.yml pulls land on the host instead of a container layer that is
     discarded on recreate.
 
-    It must exist *before* the container is created, and must be writable by both
-    the container's uid and the host user's, which differ. Getting either wrong
-    fails without naming the cause:
+    It must exist before the container is created and be owned by its UID. Getting
+    either wrong fails without naming the cause:
 
       - absent at container start: Docker creates it owned by root, and the
         staging write fails with EACCES.
-      - mode 0755: the same EACCES, because the container's uid is not the owner.
+      - owned by another host user: the container cannot write through the bind mount.
       - deleted while the container runs: the container keeps a stale mountpoint
         and every path under it fails with ENOENT, which takes a container
-        recreate to fix - and that discards Semaphore's sqlite state.
+        recreate to fix.
 
     Called from both `start` and `init-semaphore` so the ordering holds either
     way. Staging inside the lab/ mount instead was tried and does not work: a
@@ -317,19 +438,13 @@ def ensure_clab_staging_dir() -> Path:
     mkdir inside a host directory it does not own.
     """
     staging_dir = Path(__file__).parent / CLAB_STAGING_DIR
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    staging_dir.chmod(0o777)
-    print(f"Staging directory {CLAB_STAGING_DIR} ready (mode 0777, shared with the Semaphore container).")
-    return staging_dir
+    return _ensure_host_owned_directory(staging_dir, "Staging directory")
 
 
 def ensure_anta_workspace_dir() -> Path:
     """Create the host directory persisted at /opt/semaphore/anta."""
     workspace_dir = Path(__file__).parent / ANTA_WORKSPACE_DIR
-    workspace_dir.mkdir(parents=True, exist_ok=True)
-    workspace_dir.chmod(0o777)
-    print(f"ANTA workspace {ANTA_WORKSPACE_DIR} ready (mode 0777, shared with the Semaphore container).")
-    return workspace_dir
+    return _ensure_host_owned_directory(workspace_dir, "ANTA workspace")
 
 
 def _semaphore_staging_host_path(context: Context, container_path: str) -> str:
@@ -370,6 +485,7 @@ def init_semaphore(
         raise Exit("SEMAPHORE_ADMIN_PASSWORD is required; run 'uv run invoke init-secrets' first.")
 
     print("=== Semaphore Init ===")
+    _assert_semaphore_storage_compatible(context)
     ensure_clab_staging_dir()
     ensure_anta_workspace_dir()
 
@@ -633,6 +749,7 @@ def stop(ctx: Context) -> None:
     """
     Stop containers and remove networks.
     """
+    _assert_semaphore_storage_compatible(ctx)
     ctx.run(
         f"docker compose {COMPOSE_FILES} down",
         pty=True,
@@ -810,9 +927,12 @@ def start(ctx: Context) -> None:
     """
     Start the services using docker-compose in detached mode.
     """
+    # Refuse replacing old Semaphore state before preparing mounts or starting
+    # Compose; migration must preserve its config and SQLite database first.
+    _assert_semaphore_storage_compatible(ctx)
     # Before compose creates the containers: a bind-mount source that does not
     # exist yet is created by Docker as root, which the Semaphore container then
     # cannot write to.
     ensure_clab_staging_dir()
     ensure_anta_workspace_dir()
-    ctx.run(f"docker compose {COMPOSE_FILES} up -d", pty=True)
+    ctx.run(f"docker compose {COMPOSE_FILES} up -d", pty=True, env=_compose_lifecycle_environment())
