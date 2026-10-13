@@ -1,9 +1,13 @@
 import json
+import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
+import pytest
 import yaml
 from invoke import Context
+from invoke.exceptions import Exit
 
 import tasks
 
@@ -262,6 +266,7 @@ def test_init_semaphore_registers_anta_with_the_infrahub_inventory(monkeypatch: 
             pass
 
     monkeypatch.setattr(tasks, "_SemaphoreClient", InitializableFakeSemaphoreClient)
+    monkeypatch.setattr(tasks, "_assert_semaphore_storage_compatible", lambda _context: None)
     monkeypatch.setattr(tasks, "ensure_clab_staging_dir", lambda: ROOT / "lab" / "clab-staging")
     monkeypatch.setattr(tasks, "ensure_anta_workspace_dir", lambda: ROOT / "anta")
     monkeypatch.setattr(tasks, "_semaphore_staging_host_path", lambda *_args: "/host/clab-staging")
@@ -284,18 +289,104 @@ def test_init_semaphore_registers_anta_with_the_infrahub_inventory(monkeypatch: 
     assert deploy_template["environment_id"] is None
 
 
-def test_workspace_directories_are_world_writable(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+def test_workspace_directories_are_host_owned_and_not_world_writable(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(tasks, "__file__", str(tmp_path / "tasks.py"))
     monkeypatch.setattr(tasks, "CLAB_STAGING_DIR", "clab")
     monkeypatch.setattr(tasks, "ANTA_WORKSPACE_DIR", "anta")
+    monkeypatch.delenv("SEMAPHORE_UID", raising=False)
+    monkeypatch.delenv("SEMAPHORE_GID", raising=False)
 
     staging = tasks.ensure_clab_staging_dir()
     workspace = tasks.ensure_anta_workspace_dir()
 
     assert staging == tmp_path / "clab"
     assert workspace == tmp_path / "anta"
+    assert staging.stat().st_mode & 0o777 == 0o755
+    assert workspace.stat().st_mode & 0o777 == 0o755
+    assert staging.stat().st_uid == os.getuid()
+    assert workspace.stat().st_uid == os.getuid()
+
+
+def test_workspace_directories_refuse_an_identity_that_cannot_own_the_bind_mount(
+    monkeypatch: MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tasks, "__file__", str(tmp_path / "tasks.py"))
+    monkeypatch.setattr(tasks, "CLAB_STAGING_DIR", "clab")
+    monkeypatch.setenv("SEMAPHORE_UID", str(os.getuid() + 1))
+    staging = tmp_path / "clab"
+    staging.mkdir()
+    staging.chmod(0o777)
+
+    with pytest.raises(Exit, match="must be owned by the current host user"):
+        tasks.ensure_clab_staging_dir()
+
     assert staging.stat().st_mode & 0o777 == 0o777
-    assert workspace.stat().st_mode & 0o777 == 0o777
+
+
+def test_semaphore_identity_precedence_and_validation(monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
+    env_file = tmp_path / ".env"
+    env_file.write_text("SEMAPHORE_UID=1100\nSEMAPHORE_GID=1200\n", encoding="utf-8")
+    monkeypatch.setattr(tasks, "ENV_FILE_PATH", env_file)
+    monkeypatch.delenv("SEMAPHORE_UID", raising=False)
+    monkeypatch.delenv("SEMAPHORE_GID", raising=False)
+    monkeypatch.setattr(tasks.os, "getuid", lambda: 1300)
+    monkeypatch.setattr(tasks.os, "getgid", lambda: 1400)
+
+    assert tasks._semaphore_identity() == (1100, 1200)
+    monkeypatch.setenv("SEMAPHORE_UID", "1500")
+    assert tasks._semaphore_identity() == (1500, 1200)
+
+    for invalid in ("", "0", "-1", "1.5", "2147483648"):
+        monkeypatch.setenv("SEMAPHORE_UID", invalid)
+        with pytest.raises(Exit, match="SEMAPHORE_UID"):
+            tasks._semaphore_identity()
+
+    env_file.unlink()
+    monkeypatch.delenv("SEMAPHORE_UID")
+    monkeypatch.delenv("SEMAPHORE_GID", raising=False)
+    assert tasks._semaphore_identity() == (1300, 1400)
+
+
+def test_startup_guard_accepts_current_uid_and_persistent_volumes(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SEMAPHORE_UID", "1000")
+    monkeypatch.setenv("SEMAPHORE_GID", "1000")
+    container = {
+        "Config": {"User": "1000:1000"},
+        "Mounts": [
+            {"Type": "volume", "Name": "infrahub_semaphore_config", "Destination": "/etc/semaphore"},
+            {"Type": "volume", "Name": "infrahub_semaphore_data", "Destination": "/var/lib/semaphore"},
+        ],
+    }
+    calls = 0
+
+    def record_run(_context: Context, command: str, **kwargs: object) -> SimpleNamespace:
+        nonlocal calls
+        calls += 1
+        assert kwargs["hide"] is True
+        if "ps --all" in command:
+            return SimpleNamespace(ok=True, stdout="0123456789abcdef\n")
+        return SimpleNamespace(ok=True, stdout=json.dumps(container))
+
+    monkeypatch.setattr(Context, "run", record_run)
+    tasks._assert_semaphore_storage_compatible(Context())
+
+    assert calls == 2
+
+
+def test_startup_guard_blocks_unmigrated_semaphore_storage(monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("SEMAPHORE_UID", "1000")
+    monkeypatch.setenv("SEMAPHORE_GID", "1000")
+    container = {"Config": {"User": "semaphore"}, "Mounts": []}
+
+    def record_run(_context: Context, command: str, **_kwargs: object) -> SimpleNamespace:
+        if "ps --all" in command:
+            return SimpleNamespace(ok=True, stdout="0123456789abcdef\n")
+        return SimpleNamespace(ok=True, stdout=json.dumps(container))
+
+    monkeypatch.setattr(Context, "run", record_run)
+
+    with pytest.raises(Exit, match="migration instructions"):
+        tasks._assert_semaphore_storage_compatible(Context())
 
 
 def test_anta_dependencies_are_pinned_to_avd_640() -> None:
