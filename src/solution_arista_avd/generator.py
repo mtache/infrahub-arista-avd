@@ -909,7 +909,10 @@ class GeneratorMixin:
                     interface_kwargs[field_name] = value
 
             interface = await self.client.create(InterfacePhysical, **interface_kwargs)  # type: ignore[type-abstract]
-            await interface.save(allow_upsert=True)
+            # These interfaces materialize a device template; the rack generator
+            # does not own their lifecycle and must not claim them in its
+            # tracking group, or a later run can delete them as stale objects.
+            await interface.save(allow_upsert=True, update_group_context=False)
             existing_names.add(name)
 
     @staticmethod

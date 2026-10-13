@@ -465,7 +465,7 @@ async def test_create_avd_device_backfills_missing_template_physical_interfaces(
         "mtu": 9200,
         "description": "uplink",
     }
-    created_interface.save.assert_awaited_once_with(allow_upsert=True)
+    created_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
 
 @pytest.mark.asyncio
