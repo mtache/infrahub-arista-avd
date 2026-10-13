@@ -1,0 +1,21 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: ComputePhysicalServer
+  data:
+    - name: "fabric-l3ls-multipod-a-server1"
+      status: "provisioning"
+      rack: "Rack-A2-1"
+      object_template: "compute-server-dual"
+      member_of_groups: ["servers"]
+    - name: "fabric-l3ls-multipod-a-server2"
+      status: "provisioning"
+      rack: "Rack-A2-1"
+      object_template: "compute-server-dual"
+      member_of_groups: ["servers"]
+    - name: "fabric-l3ls-multipod-a-gpu1"
+      status: "provisioning"
+      rack: "Rack-A3-1"
+      object_template: "gpu-server-single"
+      member_of_groups: ["servers"]

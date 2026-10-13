@@ -1,0 +1,72 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: NetworkFabric
+  data:
+    - name: "Fabric-ISIS-LDP"
+      index: 62
+      # Single-tier ISIS-LDP core: no super-spines (no super_spine device design).
+      fabric_interface_sorting_method: "create_reverse_sorted_device_interface_map"
+      mgmt_gateway: "10.62.0.1"
+      asn_pool: "Fabric-ISIS-LDP-ASN-Pool"
+      node_id_pool: "Fabric-ISIS-LDP-NodeID-Pool"
+      mgmt_pool: "Fabric-ISIS-LDP-Mgmt-Pool"
+      fabric_ip_pools:
+        - "Fabric-ISIS-LDP-Mgmt-Pool"
+        - "Fabric-ISIS-LDP-Uplink-Pool"
+        - "Fabric-ISIS-LDP-VTEP-Pool"
+        - "Fabric-ISIS-LDP-Loopback-Pool"
+      virtual_router_mac: "00:1c:73:00:00:62"
+      underlay_routing_protocol: "isis-ldp"
+      p2p_uplinks_mtu: 9214
+      uplink_pool: "Fabric-ISIS-LDP-Uplink-Pool"
+      vtep_pool: "Fabric-ISIS-LDP-VTEP-Pool"
+      loopback_pool: "Fabric-ISIS-LDP-Loopback-Pool"
+      spanning_tree_mode: "mstp"
+      # ----------------------------------------------------------------------
+      # Illustrative PE-CE routing for customer VRF C1_VRF1 via the
+      # avd_custom_hostvars escape hatch (no schema change). eBGP peers the PE
+      # with a customer-edge (CE) router inside the customer VRF and
+      # redistributes the VRF's connected routes into that session. It is
+      # injected as custom_structured_configuration so it deep-merges (by the
+      # `name` primary key) into each device's router_bgp: PE routers (role pe)
+      # already carry a BGP AS, so the VRF neighbor renders; P-core routers
+      # (role p) have no BGP AS, so eos_cli_config_gen emits no `router bgp`
+      # block for them and the payload is harmless there. Addresses are
+      # illustrative and consistent with the C1 (10.101.x) addressing scheme;
+      # 10.101.255.0/31 stands in for the PE-CE link (PE .0, CE .1).
+      # ----------------------------------------------------------------------
+      avd_custom_hostvars:
+        custom_structured_configuration_router_bgp:
+          vrfs:
+            - name: C1_VRF1
+              neighbors:
+                - ip_address: "10.101.255.1"
+                  remote_as: "65001"
+                  description: "PE-CE_CUSTOMER1"
+              redistribute:
+                connected:
+                  enabled: true
+              address_family_ipv4:
+                neighbors:
+                  - ip_address: "10.101.255.1"
+                    activate: true
+      dns_servers:
+        - dns-google
+      ntp_servers:
+        - time.google.com
+      local_users:
+        - admin
+      member_of_groups: ["fabrics"]
+      children:
+        kind: NetworkPod
+        data:
+          - name: "mpls-core"
+            index: 1
+            device_designs:
+              data:
+                - role: spine
+                  device_quantity: 2
+                  device_template: arista-7050cx3-32c-spine-switch
+            member_of_groups: ["pods"]

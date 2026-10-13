@@ -15,6 +15,8 @@ from dotenv import dotenv_values, load_dotenv, set_key, unset_key
 from invoke import Context, task
 from invoke.exceptions import Exit
 
+from solution_arista_avd.seed_data import SeedSelection, select_seed_data
+
 CURRENT_DIRECTORY = Path(__file__).resolve()
 MAIN_DIRECTORY_PATH = Path(__file__).parent
 ENV_FILE_PATH = MAIN_DIRECTORY_PATH / ".env"
@@ -365,6 +367,8 @@ def _reconcile_anta_environment(api: _SemaphoreClient, project_id: int, workspac
 
     environment_id = int(str(existing["id"]))
     payload = _anta_environment_payload(project_id, workspace)
+    # Semaphore requires the same numeric ID in the update body and URL.
+    payload["id"] = environment_id
     payload["json"] = json.dumps(variables)
     payload["env"] = str(existing.get("env") or "{}")
     api.update(f"{list_url}/{environment_id}", payload)
@@ -697,16 +701,47 @@ def wait_for_repository_sync(name: str, timeout: int = 300, interval: int = 5) -
     raise TimeoutError(msg)
 
 
-@task(pre=[init_semaphore])
+def _seed_selection(fabrics: str | None = None) -> SeedSelection:
+    selection = os.getenv("INFRAHUB_SEED_FABRICS") if fabrics is None else fabrics
+    try:
+        return select_seed_data(MAIN_DIRECTORY_PATH / "objects", selection)
+    except ValueError as exc:
+        raise Exit(str(exc), code=1) from exc
+
+
+def _load_seed_selection(ctx: Context, selection: SeedSelection, branch: str | None = None) -> None:
+    print(f"Seed fabrics: {', '.join(selection.fabrics) or 'none (Common only)'}")
+    branch_option = f" --branch {shlex.quote(branch)}" if branch else ""
+    for directory in selection.directories:
+        print(f"Loading seed data: {directory.name}")
+        ctx.run(f"infrahubctl object load {shlex.quote(str(directory))}{branch_option}", warn=False)
+
+
+@task(
+    help={
+        "fabrics": "Override INFRAHUB_SEED_FABRICS: all, none, or comma-separated directory names.",
+        "branch": "Infrahub branch on which to load the selected seed data.",
+    }
+)
+def load_objects(ctx: Context, fabrics: str | None = None, branch: str | None = None) -> None:
+    """Load Common and selected fabrics into an instance with schemas already loaded."""
+    _load_seed_selection(ctx, _seed_selection(fabrics), branch)
+
+
+@task
 def load(ctx: Context) -> None:
-    load_schema(ctx)
-    load_menu(ctx)
-    sleep(5)
-    ctx.run("infrahubctl object load objects/")
-    ctx.run("infrahubctl object load repository.yml")
-    wait_for_repository_sync("test-repository")
-    ctx.run("infrahubctl object load repository_checks.yml")
-    ctx.run("infrahubctl object load triggers.yml")
+    """Bootstrap the stack using INFRAHUB_SEED_FABRICS (all by default)."""
+    selection = _seed_selection()
+    with ctx.cd(MAIN_DIRECTORY_PATH):
+        init_semaphore(ctx)
+        load_schema(ctx)
+        load_menu(ctx)
+        sleep(5)
+        _load_seed_selection(ctx, selection)
+        ctx.run("infrahubctl object load repository.yml")
+        wait_for_repository_sync("test-repository")
+        ctx.run("infrahubctl object load repository_checks.yml")
+        ctx.run("infrahubctl object load triggers.yml")
 
 
 @task

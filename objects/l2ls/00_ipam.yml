@@ -1,0 +1,85 @@
+---
+# ============================================================================
+# Fabric-L2LS — standalone Layer-2 Leaf-Spine example (AVD "l2ls-fabric").
+# underlay_routing_protocol: none -> the pod/rack generators create l2spine
+# spines and l2leaf leaves (gated on the fabric underlay). No EVPN/underlay
+# routing; pure Layer-2 fabric.
+# ============================================================================
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: IpamPrefix
+  data:
+    - prefix: 10.60.0.0/24
+      role: management
+    - prefix: 10.60.1.0/24
+      role: loopback
+    - prefix: 10.60.2.0/24
+      role: loopback-vtep
+    - prefix: 10.60.3.0/24
+      role: fabric_point_to_point
+    - prefix: 10.60.4.0/24     # MLAG peer-link addressing (l2leaf pair)
+      role: mlag
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: CoreIPPrefixPool
+  data:
+    - name: Fabric-L2LS-Uplink-Pool
+      default_member_type: prefix
+      default_prefix_type: IpamPrefix
+      default_prefix_length: 31
+      ip_namespace: default
+      resources:
+        - 10.60.3.0/24
+    - name: Fabric-L2LS-VTEP-Pool
+      default_member_type: prefix
+      default_prefix_type: IpamPrefix
+      default_prefix_length: 32
+      ip_namespace: default
+      resources:
+        - 10.60.2.0/24
+    - name: Fabric-L2LS-Loopback-Pool
+      default_member_type: prefix
+      default_prefix_type: IpamPrefix
+      default_prefix_length: 32
+      ip_namespace: default
+      resources:
+        - 10.60.1.0/24
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: CoreIPAddressPool
+  data:
+    - name: Fabric-L2LS-Mgmt-Pool
+      default_address_type: IpamIPAddress
+      default_prefix_length: 24
+      ip_namespace: default
+      resources:
+        - 10.60.0.0/24
+    # MLAG peer-link pool for the l2leaf main-tier pair. /31 members, disjoint
+    # from the management/loopback/vtep/uplink subnets above.
+    - name: Fabric-L2LS-MLAG-Peer-Pool
+      default_address_type: IpamIPAddress
+      default_prefix_length: 31
+      ip_namespace: default
+      resources:
+        - 10.60.4.0/24
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: CoreNumberPool
+  data:
+    - name: Fabric-L2LS-ASN-Pool
+      node: RoutingAsn
+      node_attribute: asn
+      start_range: 65600
+      end_range: 65699
+    - name: Fabric-L2LS-NodeID-Pool
+      node: DcimDevice
+      node_attribute: node_id
+      start_range: 1
+      end_range: 100

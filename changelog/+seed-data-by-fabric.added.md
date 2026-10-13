@@ -1,0 +1,1 @@
+Select independently loadable example fabrics with `INFRAHUB_SEED_FABRICS` during bootstrap or `invoke load-objects --fabrics --branch`. Shared Common data loads first; the default remains all seven fabrics.

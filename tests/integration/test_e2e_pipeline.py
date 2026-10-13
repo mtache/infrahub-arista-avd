@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 from operator import itemgetter
 from typing import TYPE_CHECKING
 
@@ -73,13 +74,13 @@ PIPELINE_BRANCH = "e2e-pipeline"
 GENERATOR_AVD_HOSTVAR = "generate-avd-device-hostvar"
 SERVER_CABLING_RACK = "Rack-B2-1"
 SERVER_CABLING_SERVER = "e2e-server-b2-1"
-SERVER_CABLING_TEMPLATE = "compute-server-dual"
+SERVER_CABLING_TEMPLATE = "multipod-b-compute-server-dual"
 DCI_POOL_PREFIX = "10.253.253.0/24"
 DCI_POOL_NAME = "E2E-DCI-Pool"
 DCI_LINK_NAME = "e2e-dci-link"
 DCI_INTERFACE_NAME = "Ethernet999"
 FILTERED_ANTA_FABRIC = "Fabric-L3LS-Multi-Domain"
-FILTERED_ANTA_TESTS = ("VerifyInterfaceDiscards", "VerifyLoggingErrors")
+FILTERED_ANTA_TESTS = ("VerifyInterfaceDiscards", "VerifyLoggingErrors", "VerifyRunningConfigDiffs")
 PROPOSED_CHANGE_ANTA_FABRIC = "Fabric-L3LS-MultiPod-A"
 
 
@@ -116,8 +117,11 @@ class TestE2EPipeline(TestInfrahubDockerClient):
     # --- Component 2: objects (main) ---------------------------------------
     @pytest.mark.asyncio(loop_scope="class")
     async def test_load_objects(self, default_branch: str, client: InfrahubClient, infrahub_port: int) -> None:
-        """Load the seed objects via ``infrahubctl object load`` (FR-003)."""
-        result = self.execute_command(command="infrahubctl object load objects/", address=self._address(infrahub_port))
+        """Load all seed fabrics through ``invoke load-objects`` (FR-003)."""
+        result = self.execute_command(
+            command=f"invoke load-objects --fabrics=all --branch={shlex.quote(default_branch)}",
+            address=self._address(infrahub_port),
+        )
         print(result.stdout, flush=True)
         if result.stderr:
             print(result.stderr, flush=True)

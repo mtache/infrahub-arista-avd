@@ -1,0 +1,42 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: DcimPlatform
+  data:
+    - name: EOS
+      manufacturer: Arista
+      description: Arista EOS
+      ansible_network_os: arista.eos.eos
+      containerlab_os: arista_ceos
+      containerlab_image: arista/ceos:4.36.0.1F
+    # Platform for the ContainerLab Linux host nodes (servers). The image is
+    # built from lab/Dockerfile; see lab/README.md.
+    - name: Linux
+      description: Generic Linux host
+      containerlab_os: linux
+      containerlab_image: lab-server
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: DcimDeviceType
+  data:
+    - name: "Arista 7050CX3-32C"
+      manufacturer: Arista
+      platform: EOS
+      description: "Arista 7050X3C, 32x100GbE QSFP+ & 2xSFP+ switch"
+      part_number: DCS-7050CX3-32C
+      height: 1
+      full_depth: true
+      weight: 9
+      containerlab_interface_mapping: DCS-7050CX3-32S.json
+    - name: "Arista 7050SX3-48YC8C"
+      manufacturer: Arista
+      platform: EOS
+      description: "Arista 7050X3, 48x25GbE SFP & 8x100GbE QSFP switch"
+      part_number: DCS-7050SX3-48YC8C
+      height: 1
+      full_depth: true
+      weight: 9
+      containerlab_interface_mapping: DCS-7050SX3-48YC8.json

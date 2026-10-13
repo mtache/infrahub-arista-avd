@@ -208,6 +208,6 @@ container image from `DcimPlatform.containerlab_image`. The transform reads them
 Text-filename attributes were chosen over attaching a `CoreFileObject` to `DcimDeviceType`: the
 files are lab fixtures that belong in the repository next to the topology that references them, and
 a filename attribute needs no generator to populate the object store. Seed values live in
-`objects/03_device_type.yml`. Note the mapping filenames intentionally differ from the device type's
+`objects/common/03_device_type.yml`. Note the mapping filenames intentionally differ from the device type's
 `part_number` (`DCS-7050CX3-32S.json` for part number `DCS-7050CX3-32C`), which is the reason the
 attribute exists rather than being derived.

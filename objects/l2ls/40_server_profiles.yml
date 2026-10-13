@@ -1,0 +1,34 @@
+---
+# ============================================================================
+# Fabric-L2LS — host endpoints, one per colour zone, mirroring the AVD
+# "l2ls-fabric" example. Each host sits on a leaf ACCESS port carrying a single
+# untagged VLAN, so PyAVD renders `mode: access` on that VLAN.
+#
+# Colour placement follows the VLAN tag scoping above:
+#   RACK1 -> blue + green      RACK2 -> blue + orange
+#
+# Each host declares only its rack + object_template + servers-group membership;
+# the generate-server-cabling generator (targets the "servers" group) auto-cables
+# it to the rack's leaf switches and reconciles the profile's untagged VLAN onto
+# the leaf access port. member_of_groups is set atomically in the same object so
+# the generator trigger does not race group membership.
+#
+# PortFast is deliberately NOT set here: it is a property of the switch port, and
+# the hostvar generator already defaults host-facing access ports to PortFast
+# `edge`. To force `network` on a specific port, set `spanning_tree_portfast` on
+# that leaf interface instead.
+# ============================================================================
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: ProfileDcimInterface
+  data:
+    - profile_name: "profile-l2ls-host-blue"
+      role: "server"
+      untagged_vlan: BLUE-NET
+    - profile_name: "profile-l2ls-host-green"
+      role: "server"
+      untagged_vlan: GREEN-NET
+    - profile_name: "profile-l2ls-host-orange"
+      role: "server"
+      untagged_vlan: ORANGE-NET

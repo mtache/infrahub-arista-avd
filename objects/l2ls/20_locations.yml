@@ -1,0 +1,75 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: LocationHall
+  data:
+    - name: "Hall-L2LS"
+      index: 60
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: LocationRack
+  data:
+    # Two MLAG rack pairs mirror the AVD l2ls-fabric example (RACK1: LEAF1/2,
+    # RACK2: LEAF3/4). Each rack is an MLAG leaf pair.
+    - name: "L2LS_RACK1"
+      index: 1
+      rack_type: compute
+      pod: l2ls-pod1
+      parent: "Hall-L2LS"
+      mlag: true
+      device_designs:
+        data:
+          - role: leaf
+            device_quantity: 2
+            device_template: arista-7050sx3-48yc8c-leaf-switch
+      member_of_groups: ["racks"]
+    - name: "L2LS_RACK2"
+      index: 2
+      rack_type: compute
+      pod: l2ls-pod1
+      parent: "Hall-L2LS"
+      mlag: true
+      device_designs:
+        data:
+          - role: leaf
+            device_quantity: 2
+            device_template: arista-7050sx3-48yc8c-leaf-switch
+      member_of_groups: ["racks"]
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  # Per-tier MSTP priorities matching the AVD l2ls-fabric example
+  # (l2spine=4096, l2leaf=16384).
+  kind: NetworkSpanningTreePriority
+  data:
+    - fabric: "Fabric-L2LS"
+      role: l2spine
+      priority: 4096
+    - fabric: "Fabric-L2LS"
+      role: l2leaf
+      priority: 16384
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  # AVD tag zones scope VLANs to leaf pairs (the example's bluezone/greenzone/
+  # orangezone). A tag is linked to the racks whose leaves carry the VLAN.
+  kind: AvdTag
+  data:
+    - name: bluezone
+      description: "Blue zone — VLAN 10 across all racks"
+      racks:
+        - L2LS_RACK1
+        - L2LS_RACK2
+    - name: greenzone
+      description: "Green zone — VLAN 20 on RACK1"
+      racks:
+        - L2LS_RACK1
+    - name: orangezone
+      description: "Orange zone — VLAN 30 on RACK2"
+      racks:
+        - L2LS_RACK2

@@ -1,0 +1,12 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: ProfileDcimInterface
+  data:
+    - profile_name: "profile-multipod-b-server-compute"
+      role: "server"
+      mtu: 9000
+      tagged_vlan:
+        - [MultiPod-B-Servers]
+        - [MultiPod-B-Storage]

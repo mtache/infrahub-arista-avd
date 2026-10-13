@@ -1,0 +1,20 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: TemplateComputePhysicalServer
+  parameters:
+    expand_range: true
+  data:
+    - template_name: "campus-endpoint-single"
+      role: "compute"
+      status: "provisioning"
+      interfaces:
+        kind: TemplateInterfacePhysical
+        parameters:
+          expand_range: true
+        data:
+          - template_name: "CampusEndpointEthernet1"
+            name: "Ethernet1"
+            profiles:
+              - profile-campus-endpoint

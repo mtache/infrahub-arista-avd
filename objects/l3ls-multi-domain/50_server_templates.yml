@@ -1,0 +1,35 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: TemplateComputePhysicalServer
+  parameters:
+    expand_range: true
+  data:
+    # platform supplies the ContainerLab kind and image (linux / lab-server) for
+    # servers rendered into the ContainerLab topology artifact. Set on the
+    # template so servers created from it inherit it.
+    - template_name: "compute-server-dual-dc1"
+      role: "compute"
+      status: "provisioning"
+      platform: Linux
+      interfaces:
+        kind: TemplateInterfacePhysical
+        parameters:
+          expand_range: true
+        data:
+          - template_name: "MultiDomainDC1ServerEthernet[1-2]"
+            name: "Ethernet[1-2]"
+            profiles: ["profile-server-dc1"]
+    - template_name: "compute-server-dual-dc2"
+      role: "compute"
+      status: "provisioning"
+      platform: Linux
+      interfaces:
+        kind: TemplateInterfacePhysical
+        parameters:
+          expand_range: true
+        data:
+          - template_name: "MultiDomainDC2ServerEthernet[1-2]"
+            name: "Ethernet[1-2]"
+            profiles: ["profile-server-dc2"]

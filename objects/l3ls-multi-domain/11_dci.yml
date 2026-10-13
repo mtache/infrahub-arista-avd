@@ -1,0 +1,163 @@
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: DcimDevice
+  data:
+    - name: "leaf-infrahub-dc1-1-1"
+      status: provisioning
+      role: border_leaf
+    - name: "leaf-infrahub-dc1-1-2"
+      status: provisioning
+      role: border_leaf
+    - name: "leaf-infrahub-dc2-1-1"
+      status: provisioning
+      role: border_leaf
+    - name: "leaf-infrahub-dc2-1-2"
+      status: provisioning
+      role: border_leaf
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: EvpnDomain
+  data:
+    - name: Fabric-L3LS-Multi-Domain-DC1
+      domain_id: "65100:1"
+      fabric: Fabric-L3LS-Multi-Domain
+    - name: Fabric-L3LS-Multi-Domain-DC2
+      domain_id: "65200:1"
+      fabric: Fabric-L3LS-Multi-Domain
+    - name: CORE
+      domain_id: "65000:100"
+      fabric: Fabric-L3LS-Multi-Domain
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: NetworkPod
+  data:
+    - name: infrahub-dc1
+      index: 1
+      parent: Fabric-L3LS-Multi-Domain
+      evpn_domain: ["Fabric-L3LS-Multi-Domain", "65100:1"]
+    - name: infrahub-dc2
+      index: 2
+      parent: Fabric-L3LS-Multi-Domain
+      evpn_domain: ["Fabric-L3LS-Multi-Domain", "65200:1"]
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: InterfacePhysical
+  data:
+    - name: Ethernet5
+      device: leaf-infrahub-dc1-1-1
+      role: peering
+    - name: Ethernet6
+      device: leaf-infrahub-dc1-1-1
+      role: peering
+    - name: Ethernet5
+      device: leaf-infrahub-dc1-1-2
+      role: peering
+    - name: Ethernet6
+      device: leaf-infrahub-dc1-1-2
+      role: peering
+    - name: Ethernet5
+      device: leaf-infrahub-dc2-1-1
+      role: peering
+    - name: Ethernet6
+      device: leaf-infrahub-dc2-1-1
+      role: peering
+    - name: Ethernet5
+      device: leaf-infrahub-dc2-1-2
+      role: peering
+    - name: Ethernet6
+      device: leaf-infrahub-dc2-1-2
+      role: peering
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: NetworkLink
+  data:
+    - name: Fabric-L3LS-Multi-Domain-DCI-1
+      medium: smf
+      role: dci
+      include_in_underlay_protocol: true
+      connected_endpoints:
+        kind: InterfacePhysical
+        data:
+          - name: Ethernet5
+            device: leaf-infrahub-dc1-1-1
+          - name: Ethernet5
+            device: leaf-infrahub-dc2-1-1
+    - name: Fabric-L3LS-Multi-Domain-DCI-2
+      medium: smf
+      role: dci
+      include_in_underlay_protocol: true
+      connected_endpoints:
+        kind: InterfacePhysical
+        data:
+          - name: Ethernet6
+            device: leaf-infrahub-dc1-1-1
+          - name: Ethernet6
+            device: leaf-infrahub-dc2-1-2
+    - name: Fabric-L3LS-Multi-Domain-DCI-3
+      medium: smf
+      role: dci
+      include_in_underlay_protocol: true
+      connected_endpoints:
+        kind: InterfacePhysical
+        data:
+          - name: Ethernet5
+            device: leaf-infrahub-dc1-1-2
+          - name: Ethernet5
+            device: leaf-infrahub-dc2-1-2
+    - name: Fabric-L3LS-Multi-Domain-DCI-4
+      medium: smf
+      role: dci
+      include_in_underlay_protocol: true
+      connected_endpoints:
+        kind: InterfacePhysical
+        data:
+          - name: Ethernet6
+            device: leaf-infrahub-dc1-1-2
+          - name: Ethernet6
+            device: leaf-infrahub-dc2-1-1
+---
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: EvpnGatewayGroup
+  data:
+    - name: Fabric-L3LS-Multi-Domain-DC1-Gateway
+      local_domain: ["Fabric-L3LS-Multi-Domain", "65100:1"]
+      pod: infrahub-dc1
+      remote_domain: ["Fabric-L3LS-Multi-Domain", "65000:100"]
+      members:
+        - leaf-infrahub-dc1-1-1
+        - leaf-infrahub-dc1-1-2
+      resiliency_model: all_active_multihoming
+      evpn_l2_enabled: true
+      evpn_l3_enabled: true
+      evpn_l3_inter_domain: true
+      d_path_enabled: true
+      all_active_multihoming_enabled: true
+      ethernet_segment_identifier: "0000:0001:0001:0000:0001"
+      ethernet_segment_rt_import: "00:01:00:00:00:01"
+    - name: Fabric-L3LS-Multi-Domain-DC2-Gateway
+      local_domain: ["Fabric-L3LS-Multi-Domain", "65200:1"]
+      pod: infrahub-dc2
+      remote_domain: ["Fabric-L3LS-Multi-Domain", "65000:100"]
+      members:
+        - leaf-infrahub-dc2-1-1
+        - leaf-infrahub-dc2-1-2
+      resiliency_model: all_active_multihoming
+      evpn_l2_enabled: true
+      evpn_l3_enabled: true
+      evpn_l3_inter_domain: true
+      d_path_enabled: true
+      all_active_multihoming_enabled: true
+      ethernet_segment_identifier: "0000:0002:0002:0000:0002"
+      ethernet_segment_rt_import: "00:02:00:00:00:02"

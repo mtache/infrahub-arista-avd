@@ -1,0 +1,125 @@
+---
+# ============================================================================
+# Fabric-L3LS-Multi-Domain: one generated fabric with two datacenter pods.
+# ============================================================================
+apiVersion: infrahub.app/v1
+kind: Object
+spec:
+  kind: NetworkFabric
+  data:
+    - name: "Fabric-L3LS-Multi-Domain"
+      index: 3
+      fabric_interface_sorting_method: "create_sorted_device_interface_map"
+      virtual_router_mac: "00:1c:73:00:00:01"
+      mgmt_gateway: "10.0.6.1"
+      asn_pool: "Fabric-L3LS-Multi-Domain-ASN-Pool"
+      node_id_pool: "Fabric-L3LS-Multi-Domain-NodeID-Pool"
+      mgmt_pool: "Fabric-L3LS-Multi-Domain-Mgmt-Pool"
+      fabric_ip_pools:
+        - "Fabric-L3LS-Multi-Domain-Mgmt-Pool"
+        - "Fabric-L3LS-Multi-Domain-Uplink-Pool"
+        - "Fabric-L3LS-Multi-Domain-VTEP-Pool"
+        - "Fabric-L3LS-Multi-Domain-Loopback-Pool"
+        - "Fabric-L3LS-Multi-Domain-DCI-Pool"
+      underlay_routing_protocol: "ebgp"
+      overlay_routing_protocol: "ebgp"
+      p2p_uplinks_mtu: 1500
+      uplink_pool: "Fabric-L3LS-Multi-Domain-Uplink-Pool"
+      vtep_pool: "Fabric-L3LS-Multi-Domain-VTEP-Pool"
+      loopback_pool: "Fabric-L3LS-Multi-Domain-Loopback-Pool"
+      dci_pool: "Fabric-L3LS-Multi-Domain-DCI-Pool"
+      spanning_tree_mode: "mstp"
+      spanning_tree_priority: 4096
+      avd_catalogs_filters:
+        # cEOS reports Management1 inDiscards after containerlab startup; data
+        # interfaces remain covered by interface-error and status tests.
+        - VerifyInterfaceDiscards
+        # cEOSLab emits SYSTEM_IDENTIFICATION_FAILED at startup because the
+        # container has no physical platform identity.
+        - VerifyLoggingErrors
+        # ZTP and runtime provisioning can leave startup/running config differences in this cEOS example.
+        - VerifyRunningConfigDiffs
+      avd_custom_hostvars:
+        custom_structured_configuration_aliases: |
+          alias cc clear counters
+          alias sa show active
+          alias senz show interface counter error | nz
+          alias shmc show int | awk '/^[A-Z]/ { intf = $1 } /, address is/ { print intf, $6 }'
+          alias snz show interface counter | nz
+          alias sqnz show interface counter queue | nz
+          alias srnz show interface counter rate | nz
+        custom_structured_configuration_clock:
+          timezone: Europe/Paris
+        custom_structured_configuration_aaa_authentication:
+          policies:
+            local:
+              allow_nopassword: true
+        custom_structured_configuration_management_interfaces:
+          - name: Management1
+            lldp:
+              transmit: false
+              receive: false
+        cv_settings:
+          cvaas:
+            enabled: true
+            clusters:
+              - name: cvaas
+                token_file: /mnt/flash/cv-onboarding-token
+          terminattr:
+            smashexcludes: ale,flexCounter,kni,pulse,strata
+            disable_aaa: true
+        custom_structured_configuration_daemon_terminattr:
+          cvtargetconfigs:
+            - arista/traffic-policy
+        management_eapi:
+          enabled: true
+        bgp_graceful_restart:
+          enabled: true
+        evpn_ebgp_gateway_multihop: 3
+        custom_platform_settings:
+          - platforms: [default]
+            feature_support:
+              bgp_update_wait_for_convergence: false
+              bgp_update_wait_install: false
+              evpn_gateway_all_active_multihoming: true
+              interface_storm_control: false
+              queue_monitor_length_notify: false
+              sflow_subinterfaces: false
+            management_interface: Management1
+            raw_eos_cli: |
+              platform tfa
+                interface mode relaying
+        custom_structured_configuration_router_bgp:
+          address_family_evpn:
+            route:
+              import_ethernet_segment_ip_mass_withdraw: true
+              export_ethernet_segment_ip_mass_withdraw: true
+            layer_2_fec_in_place_update:
+              enabled: true
+      dns_servers:
+        - dns-google
+      ntp_servers:
+        - time.google.com
+      local_users:
+        - admin
+        - mtache
+      member_of_groups: ["fabrics"]
+      children:
+        kind: NetworkPod
+        data:
+          - name: "infrahub-dc1"
+            index: 1
+            device_designs:
+              data:
+                - role: spine
+                  device_quantity: 2
+                  device_template: arista-7050cx3-32c-spine-switch
+            member_of_groups: ["pods"]
+          - name: "infrahub-dc2"
+            index: 2
+            device_designs:
+              data:
+                - role: spine
+                  device_quantity: 2
+                  device_template: arista-7050cx3-32c-spine-switch
+            member_of_groups: ["pods"]
