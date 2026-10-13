@@ -134,6 +134,25 @@ def test_every_reference_resolves_in_load_order(selection: str) -> None:
                     assert identity in available[relationship["peer"]], f"{path}:{kind}.{field}: unresolved {identity}"
 
 
+def test_profile_names_fit_infrahub_limit() -> None:
+    for path, rows in _batches("all"):
+        for kind, row in rows:
+            if kind.startswith("Profile"):
+                profile_name = row.get("profile_name")
+                assert profile_name is None or len(profile_name) <= 32, (
+                    f"{path}: {kind} profile_name exceeds 32 characters: {profile_name!r}"
+                )
+
+
+def test_multipod_b_server_template_variants_are_seeded() -> None:
+    rows = [entry for _, batch in _batches("l3ls-multipod-b") for entry in batch]
+    template_names = {row["template_name"] for kind, row in rows if kind == "TemplateComputePhysicalServer"}
+    assert {
+        "multipod-b-compute-server-single",
+        "multipod-b-compute-server-dual",
+    } <= template_names
+
+
 def test_combined_load_has_no_cross_directory_identity_collisions() -> None:
     owners: dict[tuple[str, tuple[Any, ...]], Path] = {}
     for path, rows in _batches("all"):
@@ -251,7 +270,7 @@ def test_preserved_example_sizes(selection: str, pods: int, racks: int, servers:
 @pytest.mark.parametrize(
     ("selection", "profile", "tagged", "untagged"),
     [
-        ("l3ls-multipod-b", "profile-multipod-b-server-compute", {"MultiPod-B-Servers", "MultiPod-B-Storage"}, None),
+        ("l3ls-multipod-b", "profile-multipod-b-compute", {"MultiPod-B-Servers", "MultiPod-B-Storage"}, None),
         ("campus", "profile-campus-endpoint", set(), "Campus-Data"),
         ("single-dc-l3ls", "profile-sdc-l3ls-server-compute", {"SDC-DATA", "SDC-STORAGE"}, None),
         ("single-dc-l3ls", "profile-sdc-l3ls-server-gpu", {"SDC-DATA", "SDC-STORAGE", "SDC-APP"}, None),
