@@ -27,15 +27,19 @@ Select locally with ``-m e2e``; exclude with ``-m "not e2e"``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
+from ipaddress import IPv4Interface, IPv4Network
 from operator import itemgetter
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
+import httpx
 import pytest
 import yaml
 from infrahub_sdk.protocols import CoreGenericRepository
+from infrahub_sdk.task.models import TaskFilter
 from infrahub_sdk.testing.docker import TestInfrahubDockerClient
 from infrahub_sdk.testing.repository import GitRepo
 
@@ -55,12 +59,18 @@ from .helpers import (
     GROUP_TIMEOUT,
     L2LS_MLAG_ROLES,
     POLL_INTERVAL,
+    READ_TIMEOUT,
     REPO_SYNC_INTERVAL,
     REPO_SYNC_RETRIES,
+    dci_allocation_mismatches,
+    dci_link_matches_endpoints,
     device_design_mismatches,
     expected_super_spine_count,
     fabric_deployment_report,
+    is_unrouted_l2_mlag_domain,
+    task_failure_diagnostic,
     wait_until,
+    wait_until_stable,
 )
 
 if TYPE_CHECKING:
@@ -75,8 +85,35 @@ GENERATOR_AVD_HOSTVAR = "generate-avd-device-hostvar"
 SERVER_CABLING_RACK = "Rack-B2-1"
 SERVER_CABLING_SERVER = "e2e-server-b2-1"
 SERVER_CABLING_TEMPLATE = "multipod-b-compute-server-dual"
-DCI_POOL_PREFIX = "10.253.253.0/24"
-DCI_POOL_NAME = "E2E-DCI-Pool"
+DCI_BRANCH = "e2e-dci-multi-domain"
+DCI_FABRIC_NAME = "Fabric-L3LS-Multi-Domain"
+DCI_FABRIC_DEVICE_NAMES = (
+    "leaf-infrahub-dc1-1-1",
+    "leaf-infrahub-dc1-1-2",
+    "leaf-infrahub-dc2-1-1",
+    "leaf-infrahub-dc2-1-2",
+)
+DCI_DEVICE_NAMES = ("leaf-infrahub-dc1-1-1", "leaf-infrahub-dc2-1-1")
+DCI_POOL_NAME = "Fabric-L3LS-Multi-Domain-DCI-Pool"
+DCI_POOL_RESOURCE = "172.16.0.0/28"
+DCI_SEED_LINK_ENDPOINTS = {
+    "Fabric-L3LS-Multi-Domain-DCI-1": {
+        ("leaf-infrahub-dc1-1-1", "Ethernet5"),
+        ("leaf-infrahub-dc2-1-1", "Ethernet5"),
+    },
+    "Fabric-L3LS-Multi-Domain-DCI-2": {
+        ("leaf-infrahub-dc1-1-1", "Ethernet6"),
+        ("leaf-infrahub-dc2-1-2", "Ethernet6"),
+    },
+    "Fabric-L3LS-Multi-Domain-DCI-3": {
+        ("leaf-infrahub-dc1-1-2", "Ethernet5"),
+        ("leaf-infrahub-dc2-1-2", "Ethernet5"),
+    },
+    "Fabric-L3LS-Multi-Domain-DCI-4": {
+        ("leaf-infrahub-dc1-1-2", "Ethernet6"),
+        ("leaf-infrahub-dc2-1-1", "Ethernet6"),
+    },
+}
 DCI_LINK_NAME = "e2e-dci-link"
 DCI_INTERFACE_NAME = "Ethernet999"
 FILTERED_ANTA_FABRIC = "Fabric-L3LS-Multi-Domain"
@@ -297,7 +334,11 @@ class TestE2EPipeline(TestInfrahubDockerClient):
             fetch=lambda: _asn_report(client, PIPELINE_BRANCH),
             ready=lambda r: (
                 len(r["asns"]) > 0
-                and all(d["asn_node_id"] for d in r["devices"] if d["role"] in ("super_spine", "spine", "leaf"))
+                and all(
+                    d["asn_node_id"]
+                    for d in r["devices"]
+                    if d["role"] in ("super_spine", "spine", "leaf", "border_leaf")
+                )
             ),
             timeout=GENERATOR_TIMEOUT,
             interval=POLL_INTERVAL,
@@ -309,15 +350,23 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         assert all(a["fabric_id"] for a in report["asns"]), "a RoutingAsn node has no owning fabric"
 
         # SC-002: every L3 device (super-spine/spine/leaf) resolves an ASN node.
-        l3 = [d for d in report["devices"] if d["role"] in ("super_spine", "spine", "leaf")]
+        l3 = [d for d in report["devices"] if d["role"] in ("super_spine", "spine", "leaf", "border_leaf")]
         assert l3, "no L3 devices found"
         unlinked = [d["name"] for d in l3 if not d["asn_node_id"]]
         assert not unlinked, f"L3 devices without an ASN node: {unlinked}"
 
         # C2 / SC-004: each MLAG domain shares one ASN node with both of its peers.
         asn_by_device = {d["id"]: d["asn_node_id"] for d in report["devices"]}
+        devices_by_id = {device["id"]: device for device in report["devices"]}
         for dom in report["domains"]:
             dom_asn = dom["asn_node_id"]
+            if is_unrouted_l2_mlag_domain(dom, devices_by_id, report["fabrics"]):
+                assert dom_asn is None, f"pure-L2 MLAG domain {dom['domain_id']} unexpectedly has an ASN node"
+                unnumbered_peers = [peer_id for peer_id in dom["peer_ids"] if asn_by_device.get(peer_id)]
+                assert not unnumbered_peers, (
+                    f"pure-L2 MLAG domain {dom['domain_id']} peers unexpectedly have ASN nodes: {unnumbered_peers}"
+                )
+                continue
             assert dom_asn, f"MLAG domain {dom['domain_id']} has no ASN node"
             peer_asns = {asn_by_device.get(pid) for pid in dom["peer_ids"]}
             assert peer_asns == {dom_asn}, (
@@ -508,51 +557,143 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         racks = await client.all(kind="LocationRack", branch=PIPELINE_BRANCH)
         rack_targets = sorted((rack.name.value, rack.id) for rack in racks)
         assert any(name == "DC1_BORDER" for name, _ in rack_targets), "DC1_BORDER rack not found"
+        rack_ids = [rack_id for _, rack_id in rack_targets]
+        device_ids = await _rack_device_ids(client, PIPELINE_BRANCH, rack_ids)
+        assert device_ids, "no generated devices belong to the rack rerun targets"
+        task_target_ids = sorted(set(rack_ids + device_ids))
 
         snapshots = []
         for pass_number in (1, 2):
-            await _run_generator_for_nodes(
-                client, PIPELINE_BRANCH, GENERATOR_RACK, [rack_id for _, rack_id in rack_targets]
-            )
-            snapshot = await wait_until(
-                fetch=lambda: _rack_rerun_snapshot(client, PIPELINE_BRANCH),
-                ready=itemgetter("ready"),
+            prior_tasks = await wait_until(
+                fetch=lambda: _rack_tasks_for_targets(client, PIPELINE_BRANCH, task_target_ids),
+                ready=_rack_tasks_idle,
                 timeout=GENERATOR_TIMEOUT,
                 interval=POLL_INTERVAL,
-                describe=f"rack generator rerun pass {pass_number} settled without Error",
+                describe=f"rack cascade tasks before rerun pass {pass_number}",
+            )
+            prior_task_ids = {task.id for task in prior_tasks}
+            await _run_generator_for_nodes(client, PIPELINE_BRANCH, GENERATOR_RACK, rack_ids)
+            snapshot = await wait_until_stable(
+                fetch=lambda task_ids=prior_task_ids: _rack_rerun_snapshot(
+                    client,
+                    PIPELINE_BRANCH,
+                    rack_ids,
+                    device_ids,
+                    task_ids,
+                ),
+                ready=_rack_rerun_ready,
+                timeout=GENERATOR_TIMEOUT,
+                interval=POLL_INTERVAL,
+                describe=f"rack generator rerun pass {pass_number} tasks and generated state settled",
             )
             snapshots.append(snapshot["state"])
             print(
                 f"rack rerun pass {pass_number}: racks={len(rack_targets)} "
-                f"rack_instances={len(snapshot['state']['rack_generator_instances'])}",
+                f"rack_instances={len(snapshot['state']['rack_generator_instances'])} "
+                f"tasks={len(snapshot['new_tasks'])}",
                 flush=True,
             )
 
-        assert snapshots[1] == snapshots[0], "rack rerun changed generated-state snapshot"
+        if snapshots[1] != snapshots[0]:
+            pytest.fail(
+                "rack rerun changed generated state after two stable observations:\n"
+                + _rack_snapshot_diff(snapshots[0], snapshots[1])
+            )
 
     # --- Component 11b: DCI link hostvars ----------------------------------
     @pytest.mark.asyncio(loop_scope="class")
     async def test_dci_link_generates_l3_edge_hostvars(self, client: InfrahubClient) -> None:
-        """A NetworkLink with role dci between Border Leafs generates stored l3_edge hostvars."""
-        setup = await _create_dci_link_scenario(client, PIPELINE_BRANCH)
-        await _run_generator_for_nodes(client, PIPELINE_BRANCH, GENERATOR_AVD_HOSTVAR, setup["device_ids"])
+        """The selected Multi-Domain Border Leafs render and retain a pooled DCI link."""
+        setup = await _create_dci_link_scenario(client)
+        settled_tasks = await wait_until_stable(
+            fetch=lambda: _dci_branch_task_snapshot(client, DCI_BRANCH),
+            ready=_dci_branch_tasks_ready,
+            timeout=GENERATOR_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe=f"DCI branch tasks before hostvar run for {DCI_LINK_NAME}",
+        )
+        prior_task_ids = {task["id"] for task in settled_tasks["tasks"]}
+        await _run_generator_for_nodes(client, DCI_BRANCH, GENERATOR_AVD_HOSTVAR, setup["device_ids"])
+        first_run_tasks = await wait_until_stable(
+            fetch=lambda: _dci_branch_task_snapshot(client, DCI_BRANCH),
+            ready=lambda snapshot: _dci_branch_tasks_ready_since(snapshot, prior_task_ids, setup["device_ids"]),
+            timeout=GENERATOR_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe=f"DCI hostvar generator tasks for {DCI_LINK_NAME}",
+        )
 
-        report = await wait_until(
-            fetch=lambda: _dci_hostvars_report(client, PIPELINE_BRANCH, setup["device_names"]),
+        report = await wait_until_stable(
+            fetch=lambda: _dci_hostvars_report(
+                client,
+                DCI_BRANCH,
+                setup["fabric_device_names"],
+                setup["endpoints"],
+            ),
             ready=lambda r: r["ready"] and len(r["unique_matching_links"]) == 1,
             timeout=GENERATOR_TIMEOUT,
             interval=POLL_INTERVAL,
-            describe=f"DCI l3_edge hostvars for {DCI_LINK_NAME}",
+            describe=f"stable DCI l3_edge hostvars for {DCI_LINK_NAME}",
         )
 
         link = report["unique_matching_links"][0]
         assert link["nodes"] == setup["device_names"]
         assert link["interfaces"] == setup["interface_names"]
         assert link["as"] == setup["expected_as"]
-        assert link["ip"] == ["10.253.253.0/31", "10.253.253.1/31"]
+        mismatches = dci_allocation_mismatches(
+            link["ip"],
+            DCI_POOL_RESOURCE,
+            setup["seed_allocations"],
+        )
+        assert not mismatches, "; ".join(mismatches)
         assert link["include_in_underlay_protocol"] is True
         assert "profile" not in link
         assert all("p2p_links_profiles" not in hostvars.get("l3_edge", {}) for hostvars in report["hostvars"].values())
+
+        for device_name, baseline in setup["baseline_hostvars"].items():
+            current = report["hostvars"][device_name]
+            baseline_l3_edge = baseline.get("l3_edge", {})
+            current_l3_edge = current.get("l3_edge", {})
+            assert {key: value for key, value in current_l3_edge.items() if key != "p2p_links"} == {
+                key: value for key, value in baseline_l3_edge.items() if key != "p2p_links"
+            }, f"{device_name} l3_edge fields changed beyond p2p_links"
+            current_link_ids = {_dci_link_identity(candidate) for candidate in current_l3_edge.get("p2p_links", [])}
+            for seed_link in baseline_l3_edge.get("p2p_links", []):
+                assert _dci_link_identity(seed_link) in current_link_ids, (
+                    f"{device_name} lost a seeded l3_edge link: {seed_link}"
+                )
+
+        first_allocation = list(link["ip"])
+        prior_task_ids = {task["id"] for task in first_run_tasks["tasks"]}
+        await _run_generator_for_nodes(client, DCI_BRANCH, GENERATOR_AVD_HOSTVAR, setup["device_ids"])
+        await wait_until_stable(
+            fetch=lambda: _dci_branch_task_snapshot(client, DCI_BRANCH),
+            ready=lambda snapshot: _dci_branch_tasks_ready_since(snapshot, prior_task_ids, setup["device_ids"]),
+            timeout=GENERATOR_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe=f"DCI hostvar rerun tasks for {DCI_LINK_NAME}",
+        )
+        rerun = await wait_until_stable(
+            fetch=lambda: _dci_hostvars_report(
+                client,
+                DCI_BRANCH,
+                setup["fabric_device_names"],
+                setup["endpoints"],
+            ),
+            ready=lambda r: r["ready"] and len(r["unique_matching_links"]) == 1,
+            timeout=GENERATOR_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe=f"stable DCI allocation for {DCI_LINK_NAME} after rerun",
+        )
+        assert rerun["unique_matching_links"][0]["ip"] == first_allocation
+
+        final_dci_state = await _dci_fabric_state(client, DCI_BRANCH)
+        pipeline_dci_state = await _dci_fabric_state(client, PIPELINE_BRANCH)
+        _assert_dci_fabric_state(final_dci_state, branch=DCI_BRANCH)
+        _assert_dci_fabric_state(pipeline_dci_state, branch=PIPELINE_BRANCH)
+        assert final_dci_state["fabric_id"] == setup["pipeline_fabric_state"]["fabric_id"]
+        assert final_dci_state["dci_pool"] == pipeline_dci_state["dci_pool"]
+        assert final_dci_state["fabric_ip_pools"] == pipeline_dci_state["fabric_ip_pools"]
+        assert final_dci_state["seed_links"] == pipeline_dci_state["seed_links"]
         print(f"dci hostvars report: {report}", flush=True)
 
     # --- Component 12: artifacts generated ---------------------------------
@@ -662,11 +803,12 @@ class TestE2EPipeline(TestInfrahubDockerClient):
             payload={"nodes": list(device_ids_by_name.values())},
         )
         response.raise_for_status()
-        await wait_until(
+        disabled_catalogs = await wait_until(
             fetch=lambda: _fetch_ready_artifact_contents_by_target(
                 client,
                 PIPELINE_BRANCH,
                 ARTIFACT_AVD_ANTA_CATALOG,
+                device_ids_by_name,
             ),
             ready=lambda contents: all(
                 ANTA_DISABLED_MARKER in contents.get(device_name, "") for device_name in device_ids_by_name
@@ -693,6 +835,7 @@ class TestE2EPipeline(TestInfrahubDockerClient):
                 client,
                 PIPELINE_BRANCH,
                 ARTIFACT_AVD_ANTA_CATALOG,
+                device_ids_by_name,
             ),
             ready=lambda contents: all(
                 "anta.tests." in contents.get(device_name, "")
@@ -703,7 +846,15 @@ class TestE2EPipeline(TestInfrahubDockerClient):
             interval=POLL_INTERVAL,
             describe=f"proposed-change ANTA catalogs for {PROPOSED_CHANGE_ANTA_FABRIC}",
         )
-        assert set(device_ids_by_name) <= set(refreshed)
+        assert set(refreshed) == set(device_ids_by_name)
+        for device_name in device_ids_by_name:
+            before = disabled_catalogs[device_name]
+            after = refreshed[device_name]
+            assert ANTA_DISABLED_MARKER in before, f"{device_name} had no disabled-marker catalog before the change"
+            assert "anta.tests." in after and ANTA_DISABLED_MARKER not in after, (
+                f"{device_name} catalog was not populated after the proposed change"
+            )
+            assert before != after, f"{device_name} catalog content did not change"
 
     # --- Fabric-scoped deployment validation (US4 / `--fabric` selector) ----
     @pytest.mark.asyncio(loop_scope="class")
@@ -1289,6 +1440,7 @@ async def _hostvar_snapshot(client: InfrahubClient, branch: str, device_ids: lis
         query=query,
         variables={"device_ids": device_ids},
         branch_name=branch,
+        timeout=READ_TIMEOUT,
     )
     hostvar_instances = []
     for edge in resp["CoreGeneratorInstance"]["edges"]:
@@ -1328,13 +1480,21 @@ async def _hostvar_snapshot(client: InfrahubClient, branch: str, device_ids: lis
     }
 
 
-async def _rack_rerun_snapshot(client: InfrahubClient, branch: str) -> dict:
-    """Return a normalized snapshot of rack-generated state after a rerun."""
+async def _rack_rerun_snapshot(
+    client: InfrahubClient,
+    branch: str,
+    rack_ids: list[str],
+    device_ids: list[str],
+    prior_task_ids: set[str],
+) -> dict:
+    """Read targeted rack, task, interface, hostvar, and structured-config state."""
+    target_ids = sorted(set(rack_ids + device_ids))
     query = """
-    query RackRerunSnapshot {
-      CoreGeneratorInstance {
+    query RackRerunSnapshot($rack_ids: [ID], $device_ids: [ID], $target_ids: [ID]) {
+      CoreGeneratorInstance(object__ids: $target_ids, limit: 1000) {
         edges {
           node {
+            id
             name { value }
             status { value }
             object { node { id display_label } }
@@ -1350,89 +1510,347 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str) -> dict:
           }
         }
       }
-      LocationRack {
-        edges { node { id name { value } generation_complete { value } } }
-      }
-      IpamIPAddress {
-        edges {
-          node {
-            id
-            address { value }
-            ip_namespace { node { name { value } } }
-            interface { node { id display_label } }
-          }
-        }
-      }
-      InterfacePhysical {
+      LocationRack(ids: $rack_ids, limit: 1000) {
         edges {
           node {
             id
             name { value }
-            device { node { name { value } } }
-            ip_addresses { edges { node { id address { value } } } }
+            index { value }
+            rack_type { value }
+            mlag { value }
+            generation_complete { value }
           }
         }
       }
-      AvdStructuredConfigFile {
+      DcimDevice(ids: $device_ids, limit: 1000) {
         edges {
           node {
             id
-            file_name { value }
-            checksum { value }
-            file_size { value }
-            storage_id { value }
-            artifact { node { name { value } } }
+            name { value }
+            role { value }
+            index { value }
+            node_id { value }
+            description { value }
+            os_version { value }
+            status { value }
+            position { value }
+            rack_face { value }
+            rack { node { id name { value } } }
+            pod { node { id name { value } } }
+            device_type { node { id name { value } } }
+            platform { node { id name { value } } }
+            primary_address {
+              node { id address { value } ip_namespace { node { id name { value } } } }
+            }
+            loopback_ip {
+              node { id address { value } ip_namespace { node { id name { value } } } }
+            }
+            vtep_loopback_ip {
+              node { id address { value } ip_namespace { node { id name { value } } } }
+            }
+            mgmt_ip {
+              node { id address { value } ip_namespace { node { id name { value } } } }
+            }
+            avd_artifact {
+              node {
+                hostvar_file {
+                  node {
+                    id
+                    file_name { value }
+                    file_type { value }
+                    checksum { value }
+                    file_size { value }
+                    storage_id { value }
+                  }
+                }
+                structured_config_file {
+                  node {
+                    id
+                    file_name { value }
+                    file_type { value }
+                    checksum { value }
+                    file_size { value }
+                    storage_id { value }
+                  }
+                }
+              }
+            }
           }
         }
       }
     }
     """
-    resp = await client.execute_graphql(query=query, branch_name=branch)
-    generator_instances = _normalize_generator_instances(resp["CoreGeneratorInstance"]["edges"])
-    rack_generator_instances = [
-        instance for instance in generator_instances if instance["definition_name"] == GENERATOR_RACK
+    resp = await client.execute_graphql(
+        query=query,
+        variables={"rack_ids": rack_ids, "device_ids": device_ids, "target_ids": target_ids},
+        branch_name=branch,
+        timeout=READ_TIMEOUT,
+    )
+    interface_edges, interface_count = await _rack_interface_edges(client, branch, device_ids)
+    tasks = await _rack_tasks_for_targets(client, branch, target_ids)
+    task_failures = [
+        diagnostic
+        for task in tasks
+        if task.id not in prior_task_ids and (diagnostic := task_failure_diagnostic(task)) is not None
     ]
-    rack_errors = [instance for instance in rack_generator_instances if instance["status"] == "Error"]
-    active = [
+    active_task_states = {"PENDING", "RUNNING", "SCHEDULED", "PAUSED", "CANCELLING", "IN_PROGRESS", "QUEUED"}
+    active_tasks = [_rack_task_state(task) for task in tasks if _task_state(task) in active_task_states]
+    new_tasks = [_rack_task_state(task) for task in tasks if task.id not in prior_task_ids]
+
+    generator_instances = _normalize_generator_instances(resp["CoreGeneratorInstance"]["edges"])
+    target_id_set = set(target_ids)
+    generator_instances = [instance for instance in generator_instances if instance["target_id"] in target_id_set]
+    rack_generator_instances = [
         instance
         for instance in generator_instances
-        if instance["status"].lower() in {"pending", "running", "scheduled", "in_progress", "queued"}
+        if instance["definition_name"] == GENERATOR_RACK and instance["target_id"] in set(rack_ids)
+    ]
+    generator_errors = [
+        instance for instance in generator_instances if instance["status"] in {"ERROR", "FAILED", "CRASHED"}
+    ]
+    active_generator_instances = [
+        instance for instance in generator_instances if instance["status"] in active_task_states
     ]
 
-    racks = sorted(
-        (
-            edge["node"]["name"]["value"],
-            bool(edge["node"]["generation_complete"]["value"]),
-        )
+    racks = {
+        edge["node"]["id"]: {
+            "name": edge["node"]["name"]["value"],
+            "index": (edge["node"].get("index") or {}).get("value"),
+            "rack_type": (edge["node"].get("rack_type") or {}).get("value"),
+            "mlag": (edge["node"].get("mlag") or {}).get("value"),
+            "generation_complete": bool(edge["node"]["generation_complete"]["value"]),
+        }
         for edge in resp["LocationRack"]["edges"]
-    )
-    structured_config_files = _normalize_structured_config_files(resp["AvdStructuredConfigFile"]["edges"])
-    structured_config_ethernet_ip_refs = await _structured_config_ethernet_ip_refs(
-        client,
-        resp["AvdStructuredConfigFile"]["edges"],
-    )
+    }
+    devices = {}
+    hostvar_files = {}
+    structured_config_files = {}
+    for edge in resp["DcimDevice"]["edges"]:
+        node = edge["node"]
+        device_name = node["name"]["value"]
+        rack = (node.get("rack") or {}).get("node") or {}
+        pod = (node.get("pod") or {}).get("node") or {}
+        device_type = (node.get("device_type") or {}).get("node") or {}
+        platform = (node.get("platform") or {}).get("node") or {}
+
+        devices[device_name] = {
+            "id": node["id"],
+            "role": (node.get("role") or {}).get("value"),
+            "index": (node.get("index") or {}).get("value"),
+            "node_id": (node.get("node_id") or {}).get("value"),
+            "description": (node.get("description") or {}).get("value"),
+            "os_version": (node.get("os_version") or {}).get("value"),
+            "status": (node.get("status") or {}).get("value"),
+            "position": (node.get("position") or {}).get("value"),
+            "rack_face": (node.get("rack_face") or {}).get("value"),
+            "rack": {"id": rack.get("id"), "name": (rack.get("name") or {}).get("value")},
+            "pod": {"id": pod.get("id"), "name": (pod.get("name") or {}).get("value")},
+            "device_type": {"id": device_type.get("id"), "name": (device_type.get("name") or {}).get("value")},
+            "platform": {"id": platform.get("id"), "name": (platform.get("name") or {}).get("value")},
+            "primary_address": _rack_ip_reference(node, "primary_address"),
+            "loopback_ip": _rack_ip_reference(node, "loopback_ip"),
+            "vtep_loopback_ip": _rack_ip_reference(node, "vtep_loopback_ip"),
+            "mgmt_ip": _rack_ip_reference(node, "mgmt_ip"),
+        }
+        artifact = (node.get("avd_artifact") or {}).get("node") or {}
+        hostvar_file = (artifact.get("hostvar_file") or {}).get("node") or {}
+        structured_config_file = (artifact.get("structured_config_file") or {}).get("node") or {}
+        hostvar_files[device_name] = await _rack_file_state(client, hostvar_file)
+        structured_config_files[device_name] = await _rack_file_state(client, structured_config_file)
+
+    interfaces, ipam_addresses = _normalize_rack_interfaces(interface_edges)
+    new_tasks.sort(key=itemgetter("id"))
+    active_tasks.sort(key=itemgetter("id"))
+    rack_generator_instances.sort(key=itemgetter("target_id", "name"))
+    generator_instances.sort(key=itemgetter("definition_name", "target_id", "name"))
+    devices = dict(sorted(devices.items()))
+    racks = dict(sorted(racks.items()))
+    hostvar_files = dict(sorted(hostvar_files.items()))
+    structured_config_files = dict(sorted(structured_config_files.items()))
+    # Task IDs are retained in the outer snapshot for readiness diagnostics,
+    # but are run-specific and must not count as generated-state drift.
     state = {
+        "racks": racks,
+        "devices": devices,
         "generator_instances": generator_instances,
         "rack_generator_instances": rack_generator_instances,
-        "ipam_addresses": _normalize_ipam_addresses(resp["IpamIPAddress"]["edges"]),
-        "physical_interface_ip_assignments": _normalize_physical_interface_ip_assignments(
-            resp["InterfacePhysical"]["edges"]
-        ),
+        "interfaces": interfaces,
+        "interface_count": interface_count,
+        "ipam_addresses": ipam_addresses,
+        "hostvar_files": hostvar_files,
         "structured_config_files": structured_config_files,
-        "structured_config_ethernet_ip_refs": structured_config_ethernet_ip_refs,
     }
-    return {
-        "ready": (
-            bool(rack_generator_instances)
-            and not rack_errors
-            and not active
-            and all(complete for _, complete in racks)
-            and bool(structured_config_files)
-        ),
-        "rack_errors": rack_errors,
-        "active_generator_instances": active,
+    snapshot = {
+        "rack_ids": rack_ids,
+        "device_ids": device_ids,
+        "racks": racks,
+        "devices": devices,
+        "rack_generator_instances": rack_generator_instances,
+        "new_tasks": new_tasks,
+        "active_tasks": active_tasks,
+        "active_generator_instances": active_generator_instances,
+        "task_failures": task_failures,
+        "generator_errors": generator_errors,
+        "hostvar_files": hostvar_files,
+        "structured_config_files": structured_config_files,
+        "interface_count": interface_count,
+        "interfaces": interfaces,
         "state": state,
     }
+    snapshot["ready"] = _rack_rerun_ready(snapshot)
+    return snapshot
+
+
+async def _rack_device_ids(client: InfrahubClient, branch: str, rack_ids: list[str]) -> list[str]:
+    """Return generated device IDs for the selected racks in stable order."""
+    devices = await client.filters(kind="DcimDevice", rack__ids=rack_ids, branch=branch)
+    return sorted({device.id for device in devices})
+
+
+async def _rack_tasks_for_targets(client: InfrahubClient, branch: str, target_ids: list[str]) -> list:
+    """List tasks on one branch that target one of the selected racks or devices."""
+    tasks = await client.task.filter(
+        filter=TaskFilter(branch=branch, related_node__ids=target_ids),
+        timeout=READ_TIMEOUT,
+        include_related_nodes=True,
+    )
+    detailed_tasks = []
+    for task in tasks:
+        detailed_task = task
+        if _task_state(task) in {"FAILED", "CRASHED", "CANCELLED"}:
+            detailed_task = await client.task.get(id=task.id, include_logs=True, include_related_nodes=True)
+        detailed_tasks.append(detailed_task)
+    return sorted(detailed_tasks, key=lambda task: (task.created_at, task.id))
+
+
+async def _rack_interface_edges(client: InfrahubClient, branch: str, device_ids: list[str]) -> tuple[list[dict], int]:
+    """Read every physical interface for the target devices using bounded pages."""
+    query = """
+    query RackRerunInterfaces($device_ids: [ID], $offset: Int!, $limit: Int!) {
+      InterfacePhysical(device__ids: $device_ids, offset: $offset, limit: $limit) {
+        count
+        edges {
+          node {
+            id
+            name { value }
+            status { value }
+            role { value }
+            mtu { value }
+            description { value }
+            index { value }
+            dot1q_id { value }
+            mac_address { value }
+            spanning_tree_portfast { value }
+            l2_mode { value }
+            device { node { id name { value } } }
+            lag { node { id name { value } channel_id { value } } }
+            untagged_vlan { node { id name { value } vlan_id { value } } }
+            tagged_vlan {
+              edges {
+                node {
+                  id
+                  name { value }
+                  vlan_id { value }
+                }
+              }
+            }
+            connector {
+              node {
+                __typename
+                id
+                display_label
+                name { value }
+                medium { value }
+                ... on NetworkLink {
+                  role { value }
+                  include_in_underlay_protocol { value }
+                }
+                connected_endpoints {
+                  edges {
+                    node {
+                      __typename
+                      id
+                      display_label
+                    }
+                  }
+                }
+              }
+            }
+            ip_address {
+              node {
+                id
+                address { value }
+                ip_namespace { node { id name { value } } }
+              }
+            }
+            ip_addresses {
+              edges {
+                node {
+                  id
+                  address { value }
+                  ip_namespace { node { id name { value } } }
+                }
+              }
+            }
+            profiles {
+              edges {
+                node {
+                  id
+                  profile_name { value }
+                  profile_priority { value }
+                }
+              }
+            }
+            member_of_groups {
+              edges {
+                node {
+                  id
+                  name { value }
+                  group_type { value }
+                }
+              }
+            }
+            subscriber_of_groups {
+              edges {
+                node {
+                  id
+                  name { value }
+                  group_type { value }
+                }
+              }
+            }
+            tags {
+              edges {
+                node {
+                  id
+                  name { value }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    offset = 0
+    limit = 500
+    count = 0
+    edges = []
+    while offset == 0 or offset < count:
+        response = await client.execute_graphql(
+            query=query,
+            variables={"device_ids": device_ids, "offset": offset, "limit": limit},
+            branch_name=branch,
+            timeout=READ_TIMEOUT,
+        )
+        connection = response["InterfacePhysical"]
+        count = connection["count"]
+        page = connection["edges"]
+        if not page:
+            break
+        edges.extend(page)
+        offset += len(page)
+    return edges, count
 
 
 def _normalize_generator_instances(edges: list[dict]) -> list[dict]:
@@ -1444,108 +1862,495 @@ def _normalize_generator_instances(edges: list[dict]) -> list[dict]:
         target = (node.get("object") or {}).get("node") or {}
         instances.append(
             {
+                "id": node.get("id") or "",
                 "name": (node.get("name") or {}).get("value") or "",
-                "status": (node.get("status") or {}).get("value") or "",
+                "status": ((node.get("status") or {}).get("value") or "").upper(),
                 "definition_name": definition_name or "",
+                "target_id": target.get("id") or "",
                 "target": target.get("display_label") or target.get("id") or "",
             }
         )
-    return sorted(instances, key=itemgetter("definition_name", "target", "name"))
+    return sorted(instances, key=itemgetter("definition_name", "target_id", "name"))
 
 
-def _normalize_ipam_addresses(edges: list[dict]) -> list[dict]:
-    addresses = []
+def _task_state(task: Any) -> str:
+    state = getattr(task, "state", "")
+    return str(getattr(state, "value", state)).upper()
+
+
+def _rack_task_state(task: Any) -> dict[str, Any]:
+    targets = sorted(f"{node.kind}:{node.id}" for node in getattr(task, "related_nodes", []))
+    return {
+        "id": task.id,
+        "title": task.title,
+        "state": _task_state(task),
+        "branch": task.branch,
+        "targets": targets,
+    }
+
+
+def _rack_tasks_idle(tasks: list) -> bool:
+    """Wait until no task on the targeted branch/rack cascade remains active."""
+    active_states = {"PENDING", "RUNNING", "SCHEDULED", "PAUSED", "CANCELLING", "IN_PROGRESS", "QUEUED"}
+    return not any(_task_state(task) in active_states for task in tasks)
+
+
+def _rack_rerun_ready(snapshot: dict) -> bool:
+    """Require completed new tasks and complete generated state, failing on task errors."""
+    if snapshot.get("task_failures"):
+        raise AssertionError("rack rerun tasks failed:\n" + "\n".join(snapshot["task_failures"]))
+    if snapshot.get("generator_errors"):
+        failures = [
+            f"{instance['status']} generator {instance['definition_name']} "
+            f"target={instance['target']} ({instance['target_id']})"
+            for instance in snapshot["generator_errors"]
+        ]
+        raise AssertionError("rack generator instances failed:\n" + "\n".join(failures))
+
+    new_tasks = snapshot.get("new_tasks", [])
+    if not new_tasks or any(task["state"] != "COMPLETED" for task in new_tasks):
+        return False
+    if snapshot.get("active_tasks") or snapshot.get("active_generator_instances"):
+        return False
+
+    rack_ids = set(snapshot.get("rack_ids", []))
+    device_ids = set(snapshot.get("device_ids", []))
+    rack_instance_targets = {instance["target_id"] for instance in snapshot.get("rack_generator_instances", [])}
+    if rack_instance_targets != rack_ids:
+        return False
+    racks = snapshot.get("racks", {})
+    if set(racks) != rack_ids or not all(rack["generation_complete"] for rack in racks.values()):
+        return False
+    devices = snapshot.get("devices", {})
+    if {device["id"] for device in devices.values()} != device_ids:
+        return False
+    if set(snapshot.get("hostvar_files", {})) != set(devices):
+        return False
+    if set(snapshot.get("structured_config_files", {})) != set(devices):
+        return False
+    if snapshot.get("interface_count") != len(snapshot.get("interfaces", [])):
+        return False
+    files = list(snapshot["hostvar_files"].values()) + list(snapshot["structured_config_files"].values())
+    return all(file and file["checksum"] and file["storage_id"] and file["content"] is not None for file in files)
+
+
+async def _rack_file_state(client: InfrahubClient, file_node: dict) -> dict | None:
+    """Capture complete file metadata and parsed JSON for a targeted device."""
+    if not file_node:
+        return None
+    storage_id = (file_node.get("storage_id") or {}).get("value")
+    content = None
+    if storage_id:
+        content = json.loads(await client.object_store.get(identifier=storage_id))
+    return {
+        "id": file_node.get("id") or "",
+        "file_name": (file_node.get("file_name") or {}).get("value") or "",
+        "file_type": (file_node.get("file_type") or {}).get("value") or "",
+        "checksum": (file_node.get("checksum") or {}).get("value") or "",
+        "file_size": (file_node.get("file_size") or {}).get("value") or 0,
+        "storage_id": storage_id or "",
+        "content": content,
+    }
+
+
+def _rack_ip_reference(device_node: dict, relation_name: str) -> dict | None:
+    address_node = (device_node.get(relation_name) or {}).get("node") or {}
+    if not address_node:
+        return None
+    namespace = (address_node.get("ip_namespace") or {}).get("node") or {}
+    return {
+        "id": address_node.get("id") or "",
+        "address": (address_node.get("address") or {}).get("value") or "",
+        "namespace": (namespace.get("name") or {}).get("value") or "default",
+    }
+
+
+def _normalize_rack_interfaces(edges: list[dict]) -> tuple[list[dict], list[dict]]:
+    interfaces = []
+    ipam_addresses = []
     for edge in edges:
         node = edge["node"]
-        interface = (node.get("interface") or {}).get("node") or {}
-        namespace = ((node.get("ip_namespace") or {}).get("node") or {}).get("name", {}).get("value") or "default"
-        addresses.append(
-            {
-                "address": (node.get("address") or {}).get("value"),
-                "namespace": namespace,
-                "interface": interface.get("display_label") or interface.get("id") or "",
-            }
-        )
-    return sorted(addresses, key=itemgetter("namespace", "address", "interface"))
-
-
-def _normalize_physical_interface_ip_assignments(edges: list[dict]) -> list[dict]:
-    assignments = []
-    for edge in edges:
-        node = edge["node"]
-        device_name = ((node.get("device") or {}).get("node") or {}).get("name", {}).get("value") or ""
+        device = (node.get("device") or {}).get("node") or {}
+        device_name = (device.get("name") or {}).get("value") or ""
         interface_name = (node.get("name") or {}).get("value") or ""
-        ip_addresses = sorted(
-            (ip_edge["node"].get("address") or {}).get("value")
+        connector = (node.get("connector") or {}).get("node") or {}
+        lag = (node.get("lag") or {}).get("node") or {}
+        untagged_vlan = (node.get("untagged_vlan") or {}).get("node") or {}
+        tagged_vlans = [edge["node"] for edge in (node.get("tagged_vlan") or {}).get("edges", []) if edge.get("node")]
+        ip_nodes = [
+            ip_edge.get("node") or {}
             for ip_edge in (node.get("ip_addresses") or {}).get("edges", [])
             if ip_edge.get("node")
-        )
-        if ip_addresses:
-            assignments.append(
-                {
-                    "device": device_name,
-                    "interface": interface_name,
-                    "ip_addresses": ip_addresses,
-                }
-            )
-    return sorted(assignments, key=itemgetter("device", "interface"))
-
-
-def _normalize_structured_config_files(edges: list[dict]) -> list[dict]:
-    files = []
-    for edge in edges:
-        node = edge["node"]
-        artifact = (node.get("artifact") or {}).get("node") or {}
-        files.append(
+        ]
+        singular_ip = (node.get("ip_address") or {}).get("node") or {}
+        if singular_ip:
+            ip_nodes.append(singular_ip)
+        ip_states_by_id = {}
+        for ip_node in ip_nodes:
+            namespace = (ip_node.get("ip_namespace") or {}).get("node") or {}
+            ip_state = {
+                "id": ip_node.get("id") or "",
+                "address": (ip_node.get("address") or {}).get("value") or "",
+                "namespace": (namespace.get("name") or {}).get("value") or "default",
+            }
+            ip_states_by_id[ip_state["id"] or f"{ip_state['namespace']}:{ip_state['address']}"] = ip_state
+        ip_addresses = list(ip_states_by_id.values())
+        ipam_addresses.extend(
             {
-                "artifact": (artifact.get("name") or {}).get("value") or "",
-                "file_name": (node.get("file_name") or {}).get("value") or "",
-                "checksum": (node.get("checksum") or {}).get("value") or "",
-                "file_size": (node.get("file_size") or {}).get("value") or 0,
+                "id": ip_state["id"],
+                "address": ip_state["address"],
+                "namespace": ip_state["namespace"],
+                "device": device_name,
+                "interface": interface_name,
+            }
+            for ip_state in ip_addresses
+        )
+        connected_endpoints = [
+            {
+                "kind": endpoint["node"].get("__typename") or "",
+                "id": endpoint["node"].get("id") or "",
+                "display_label": endpoint["node"].get("display_label") or "",
+            }
+            for endpoint in (connector.get("connected_endpoints") or {}).get("edges", [])
+            if endpoint.get("node")
+        ]
+        profiles = [edge["node"] for edge in (node.get("profiles") or {}).get("edges", []) if edge.get("node")]
+        member_of_groups = [
+            edge["node"] for edge in (node.get("member_of_groups") or {}).get("edges", []) if edge.get("node")
+        ]
+        subscriber_of_groups = [
+            edge["node"] for edge in (node.get("subscriber_of_groups") or {}).get("edges", []) if edge.get("node")
+        ]
+        tags = [edge["node"] for edge in (node.get("tags") or {}).get("edges", []) if edge.get("node")]
+        interfaces.append(
+            {
+                "id": node.get("id") or "",
+                "device": device_name,
+                "name": interface_name,
+                "status": (node.get("status") or {}).get("value"),
+                "role": (node.get("role") or {}).get("value"),
+                "mtu": (node.get("mtu") or {}).get("value"),
+                "description": (node.get("description") or {}).get("value"),
+                "index": (node.get("index") or {}).get("value"),
+                "dot1q_id": (node.get("dot1q_id") or {}).get("value"),
+                "mac_address": (node.get("mac_address") or {}).get("value"),
+                "spanning_tree_portfast": (node.get("spanning_tree_portfast") or {}).get("value"),
+                "l2_mode": (node.get("l2_mode") or {}).get("value"),
+                "lag": {
+                    "id": lag.get("id"),
+                    "name": (lag.get("name") or {}).get("value"),
+                    "channel_id": (lag.get("channel_id") or {}).get("value"),
+                },
+                "untagged_vlan": {
+                    "id": untagged_vlan.get("id"),
+                    "name": (untagged_vlan.get("name") or {}).get("value"),
+                    "vlan_id": (untagged_vlan.get("vlan_id") or {}).get("value"),
+                },
+                "tagged_vlans": sorted(
+                    (
+                        {
+                            "id": vlan.get("id") or "",
+                            "name": (vlan.get("name") or {}).get("value"),
+                            "vlan_id": (vlan.get("vlan_id") or {}).get("value"),
+                        }
+                        for vlan in tagged_vlans
+                    ),
+                    key=lambda vlan: (vlan["name"] or "", vlan["id"]),
+                ),
+                "connector": {
+                    "kind": connector.get("__typename") or "",
+                    "id": connector.get("id") or "",
+                    "name": (connector.get("name") or {}).get("value"),
+                    "medium": (connector.get("medium") or {}).get("value"),
+                    "role": (connector.get("role") or {}).get("value"),
+                    "include_in_underlay_protocol": (connector.get("include_in_underlay_protocol") or {}).get("value"),
+                    "endpoints": sorted(connected_endpoints, key=itemgetter("kind", "display_label", "id")),
+                },
+                "profiles": sorted(
+                    (
+                        {
+                            "id": profile.get("id") or "",
+                            "name": (profile.get("profile_name") or {}).get("value"),
+                            "priority": (profile.get("profile_priority") or {}).get("value"),
+                        }
+                        for profile in profiles
+                    ),
+                    key=lambda profile: (
+                        profile["priority"] is None,
+                        profile["priority"] or 0,
+                        profile["name"] or "",
+                        profile["id"],
+                    ),
+                ),
+                "member_of_groups": sorted(
+                    (
+                        {
+                            "id": group.get("id") or "",
+                            "name": (group.get("name") or {}).get("value"),
+                            "group_type": (group.get("group_type") or {}).get("value"),
+                        }
+                        for group in member_of_groups
+                    ),
+                    key=lambda group: (group["group_type"] or "", group["name"] or "", group["id"]),
+                ),
+                "subscriber_of_groups": sorted(
+                    (
+                        {
+                            "id": group.get("id") or "",
+                            "name": (group.get("name") or {}).get("value"),
+                            "group_type": (group.get("group_type") or {}).get("value"),
+                        }
+                        for group in subscriber_of_groups
+                    ),
+                    key=lambda group: (group["group_type"] or "", group["name"] or "", group["id"]),
+                ),
+                "tags": sorted(
+                    (
+                        {
+                            "id": tag.get("id") or "",
+                            "name": (tag.get("name") or {}).get("value"),
+                        }
+                        for tag in tags
+                    ),
+                    key=lambda tag: (tag["name"] or "", tag["id"]),
+                ),
+                "ip_addresses": sorted(ip_addresses, key=itemgetter("namespace", "address", "id")),
             }
         )
-    return sorted(files, key=itemgetter("artifact", "file_name"))
+    interfaces.sort(key=itemgetter("device", "name", "id"))
+    ipam_addresses.sort(key=itemgetter("device", "interface", "namespace", "address", "id"))
+    return interfaces, ipam_addresses
 
 
-async def _structured_config_ethernet_ip_refs(client: InfrahubClient, edges: list[dict]) -> list[dict]:
-    refs = []
-    for edge in edges:
-        node = edge["node"]
-        storage_id = (node.get("storage_id") or {}).get("value")
-        if not storage_id:
-            continue
-        content = await client.object_store.get(identifier=storage_id)
-        structured_config = json.loads(content)
-        artifact = (node.get("artifact") or {}).get("node") or {}
-        for interface in structured_config.get("ethernet_interfaces", []):
-            if not interface.get("ip_address"):
-                continue
-            refs.append(
-                {
-                    "artifact": (artifact.get("name") or {}).get("value") or "",
-                    "interface": interface.get("name") or "",
-                    "ip_address": interface.get("ip_address") or "",
-                }
+def _rack_snapshot_diff(previous: dict, current: dict) -> str:
+    """Show every changed snapshot field, with paths scoped to device/interface."""
+    differences: list[str] = []
+
+    def visit(path: str, expected: Any, observed: Any) -> None:
+        if expected == observed:
+            return
+        if isinstance(expected, dict) and isinstance(observed, dict):
+            for key in sorted(set(expected) | set(observed)):
+                child_path = f"{path}.{key}" if path else str(key)
+                if key not in expected:
+                    differences.append(f"{child_path}: added {_snapshot_value(child_path, observed[key])}")
+                elif key not in observed:
+                    differences.append(f"{child_path}: removed {_snapshot_value(child_path, expected[key])}")
+                else:
+                    visit(child_path, expected[key], observed[key])
+            return
+        if isinstance(expected, list) and isinstance(observed, list):
+            expected_by_identity = _snapshot_list_items(expected)
+            observed_by_identity = _snapshot_list_items(observed)
+            if expected_by_identity is not None and observed_by_identity is not None:
+                for identity in sorted(set(expected_by_identity) | set(observed_by_identity)):
+                    if identity not in expected_by_identity:
+                        value = observed_by_identity[identity]
+                        label = _snapshot_list_label(value, 0)
+                        differences.append(f"{path}{label}: added {_snapshot_value(path, value)}")
+                    elif identity not in observed_by_identity:
+                        value = expected_by_identity[identity]
+                        label = _snapshot_list_label(value, 0)
+                        differences.append(f"{path}{label}: removed {_snapshot_value(path, value)}")
+                    else:
+                        old_item = expected_by_identity[identity]
+                        new_item = observed_by_identity[identity]
+                        label = _snapshot_list_label(old_item, 0)
+                        visit(f"{path}{label}", old_item, new_item)
+                return
+            for index in range(max(len(expected), len(observed))):
+                if index >= len(expected):
+                    value = observed[index]
+                    label = _snapshot_list_label(value, index)
+                    differences.append(f"{path}{label}: added {_snapshot_value(path, value)}")
+                elif index >= len(observed):
+                    value = expected[index]
+                    label = _snapshot_list_label(value, index)
+                    differences.append(f"{path}{label}: removed {_snapshot_value(path, value)}")
+                else:
+                    old_item = expected[index]
+                    new_item = observed[index]
+                    label = _snapshot_list_label(old_item, index)
+                    new_label = _snapshot_list_label(new_item, index)
+                    if label != new_label and isinstance(old_item, dict) and isinstance(new_item, dict):
+                        visit(f"{path}[{label}->{new_label}]", old_item, new_item)
+                    else:
+                        visit(f"{path}{label}", old_item, new_item)
+            return
+        differences.append(f"{path}: {_snapshot_value(path, expected)} -> {_snapshot_value(path, observed)}")
+
+    visit("state", previous, current)
+    return "\n".join(differences) if differences else "no differing snapshot fields found"
+
+
+def _snapshot_list_label(value: Any, index: int) -> str:
+    if isinstance(value, dict):
+        if isinstance(value.get("device"), str) and isinstance(value.get("name"), str):
+            return f"[{value['device']}/{value['name']}]"
+        if isinstance(value.get("device"), str) and isinstance(value.get("interface"), str):
+            return f"[{value['device']}/{value['interface']}]"
+        for key in ("interface", "name", "id"):
+            label = value.get(key)
+            if isinstance(label, str) and label:
+                return f"[{label}]"
+    return f"[{index}]"
+
+
+def _snapshot_value(path: str, value: Any) -> str:
+    if any(secret in path.lower() for secret in ("password", "secret", "token", "credential", "authorization")):
+        return "<redacted>"
+    rendered = repr(_redact_snapshot_value(value))
+    return rendered if len(rendered) <= 240 else f"{rendered[:237]}..."
+
+
+def _redact_snapshot_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: "<redacted>"
+            if any(
+                secret in str(key).lower() for secret in ("password", "secret", "token", "credential", "authorization")
             )
-    return sorted(refs, key=itemgetter("artifact", "interface", "ip_address"))
+            else _redact_snapshot_value(nested)
+            for key, nested in value.items()
+        }
+    if isinstance(value, list):
+        return [_redact_snapshot_value(item) for item in value]
+    return value
 
 
-async def _create_dci_link_scenario(client: InfrahubClient, branch: str) -> dict:
-    """Create one complete DCI link using the shared connector workflow."""
-    candidates = await _dci_leaf_candidates(client, branch)
-    assert len(candidates) >= 2, f"expected two leaves with spare physical interfaces, got {candidates}"
-    left, right = candidates[:2]
+def _snapshot_list_items(values: list[Any]) -> dict[tuple[str, ...], Any] | None:
+    items = {}
+    for value in values:
+        if not isinstance(value, dict):
+            return None
+        if isinstance(value.get("device"), str) and isinstance(value.get("name"), str):
+            identity = ("device", value["device"], "interface", value["name"])
+        elif isinstance(value.get("id"), str) and value["id"]:
+            identity = ("id", value["id"])
+        else:
+            return None
+        if identity in items:
+            return None
+        items[identity] = value
+    return items
 
-    await _ensure_dci_pool(client, branch, left["fabric_id"])
 
-    for device_id in (left["device_id"], right["device_id"]):
-        device = await client.get(kind="DcimDevice", id=device_id, branch=branch)
-        device.role.value = "border_leaf"
-        await device.save(allow_upsert=True)
+async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
+    """Create one test DCI link on a dedicated branch with generated fabric state."""
+    pipeline_fabric_state = await _dci_fabric_state(client, PIPELINE_BRANCH)
+    _assert_dci_fabric_state(pipeline_fabric_state, branch=PIPELINE_BRANCH)
+    pipeline_branch = await client.branch.get(PIPELINE_BRANCH)
+    await _create_dci_branch(client, expected_origin=pipeline_branch.origin_branch)
+    branch_fabric_state = await _dci_fabric_state(client, DCI_BRANCH)
+    _assert_dci_fabric_state(branch_fabric_state, branch=DCI_BRANCH)
+    assert branch_fabric_state["fabric_id"] == pipeline_fabric_state["fabric_id"]
+    assert branch_fabric_state["dci_pool"] == pipeline_fabric_state["dci_pool"]
+    assert branch_fabric_state["fabric_ip_pools"] == pipeline_fabric_state["fabric_ip_pools"]
+    assert branch_fabric_state["seed_links"] == pipeline_fabric_state["seed_links"]
+
+    # InfraHub 1.11.5 only allows a new branch from the default branch. Seeded
+    # topology is present there, so regenerate this fabric on the isolated DCI
+    # branch before creating the test link.
+    await _run_generator_for_nodes(client, DCI_BRANCH, GENERATOR_FABRIC, [branch_fabric_state["fabric_id"]])
+    await wait_until_stable(
+        fetch=lambda: _dci_branch_task_snapshot(client, DCI_BRANCH),
+        ready=_dci_branch_tasks_ready,
+        timeout=GENERATOR_TIMEOUT,
+        interval=POLL_INTERVAL,
+        describe=f"generator tasks on {DCI_BRANCH}",
+    )
+    seed_hostvars = await wait_until(
+        fetch=lambda: _dci_hostvars_report(client, DCI_BRANCH, list(DCI_FABRIC_DEVICE_NAMES)),
+        ready=itemgetter("ready"),
+        timeout=GENERATOR_TIMEOUT,
+        interval=POLL_INTERVAL,
+        describe=f"seed DCI hostvars on {DCI_BRANCH}",
+    )
+
+    query = """
+    query DciBorderLeafs($device_names: [String!]!) {
+      DcimDevice(name__values: $device_names) {
+        edges {
+          node {
+            id
+            name { value }
+            role { value }
+            asn { node { id asn { value } } }
+            pod {
+              node {
+                parent {
+                  node {
+                    __typename
+                    ... on NetworkFabric { id name { value } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    response = await client.execute_graphql(
+        query=query,
+        variables={"device_names": list(DCI_DEVICE_NAMES)},
+        branch_name=DCI_BRANCH,
+        timeout=READ_TIMEOUT,
+    )
+    devices = []
+    for edge in response["DcimDevice"]["edges"]:
+        node = edge["node"]
+        fabric = (((node.get("pod") or {}).get("node") or {}).get("parent") or {}).get("node") or {}
+        asn_node = (node.get("asn") or {}).get("node") or {}
+        asn = (asn_node.get("asn") or {}).get("value")
+        assert node["role"]["value"] == "border_leaf", f"{node['name']['value']} lost its border_leaf role"
+        assert fabric.get("id") == branch_fabric_state["fabric_id"], (
+            f"{node['name']['value']} does not belong to selected fabric {DCI_FABRIC_NAME}"
+        )
+        assert fabric.get("name", {}).get("value") == DCI_FABRIC_NAME, (
+            f"{node['name']['value']} does not belong to {DCI_FABRIC_NAME}"
+        )
+        assert asn is not None, f"{node['name']['value']} has no ASN"
+        devices.append(
+            {
+                "device_id": node["id"],
+                "device_name": node["name"]["value"],
+                "role": node["role"]["value"],
+                "asn_id": asn_node.get("id"),
+                "asn": int(asn),
+                "fabric_id": fabric["id"],
+            }
+        )
+    devices.sort(key=itemgetter("device_name", "device_id"))
+    assert [device["device_name"] for device in devices] == list(DCI_DEVICE_NAMES), (
+        f"expected exactly the selected DCI border leafs {DCI_DEVICE_NAMES}, "
+        f"observed {[device['device_name'] for device in devices]}"
+    )
+    assert len({device["fabric_id"] for device in devices}) == 1
+    assert len({device["asn_id"] for device in devices}) == 1, f"DCI endpoints do not share an ASN: {devices}"
+
+    seed_links = []
+    for seed_link_name, seed_endpoints in DCI_SEED_LINK_ENDPOINTS.items():
+        matches = [link for link in seed_hostvars["links"] if dci_link_matches_endpoints(link, list(seed_endpoints))]
+        assert len(matches) == 1, f"expected one hostvar link for seeded DCI link {seed_link_name}, observed {matches}"
+        seed_links.extend(matches)
+    seed_allocations = sorted(
+        {str(IPv4Interface(address).network) for link in seed_links for address in link.get("ip", [])}
+    )
+    assert len(seed_allocations) == len(DCI_SEED_LINK_ENDPOINTS), (
+        f"expected four existing seed DCI allocations, observed {seed_allocations}"
+    )
+    assert all(IPv4Network(allocation).subnet_of(IPv4Network(DCI_POOL_RESOURCE)) for allocation in seed_allocations)
+
+    baseline_report = await asyncio.wait_for(
+        _dci_hostvars_report(client, DCI_BRANCH, list(DCI_FABRIC_DEVICE_NAMES)),
+        timeout=READ_TIMEOUT,
+    )
+    assert baseline_report["ready"], f"selected DCI branch hostvars are incomplete: {baseline_report}"
 
     dci_link = await client.create(
         kind="NetworkLink",
-        branch=branch,
+        branch=DCI_BRANCH,
         name=DCI_LINK_NAME,
         medium="smf",
         role="dci",
@@ -1553,95 +2358,204 @@ async def _create_dci_link_scenario(client: InfrahubClient, branch: str) -> dict
     )
     await dci_link.save(allow_upsert=True)
 
-    for endpoint in (left, right):
+    endpoints = [(device["device_name"], DCI_INTERFACE_NAME) for device in devices]
+    for device in devices:
+        existing = await client.filters(
+            kind="InterfacePhysical",
+            name__value=DCI_INTERFACE_NAME,
+            device__ids=[device["device_id"]],
+            branch=DCI_BRANCH,
+        )
+        assert not existing, f"{device['device_name']} already has {DCI_INTERFACE_NAME}"
         dci_interface = await client.create(
             kind="InterfacePhysical",
-            branch=branch,
+            branch=DCI_BRANCH,
             name=DCI_INTERFACE_NAME,
-            device={"id": endpoint["device_id"]},
+            device={"id": device["device_id"]},
             role="peering",
         )
         await dci_interface.save(allow_upsert=True)
-        iface = await client.get(kind="InterfacePhysical", id=dci_interface.id, branch=branch, include=["connector"])
-        iface.connector = dci_link
-        iface.status.value = "active"
-        await iface.save(allow_upsert=True)
-        endpoint["interface_id"] = dci_interface.id
-        endpoint["interface_name"] = DCI_INTERFACE_NAME
+        interface = await client.get(
+            kind="InterfacePhysical",
+            id=dci_interface.id,
+            branch=DCI_BRANCH,
+            include=["connector"],
+        )
+        interface.connector = dci_link
+        interface.status.value = "active"
+        await interface.save(allow_upsert=True)
 
     return {
-        "device_ids": [left["device_id"], right["device_id"]],
-        "device_names": [left["device_name"], right["device_name"]],
-        "interface_names": [left["interface_name"], right["interface_name"]],
-        # Candidates are sorted by device name, matching the generator's endpoint
-        # ordering, so the AS list follows the same order.
-        "expected_as": [left["device_asn"], right["device_asn"]],
+        "device_ids": [device["device_id"] for device in devices],
+        "device_names": [device["device_name"] for device in devices],
+        "interface_names": [interface for _, interface in endpoints],
+        "endpoints": endpoints,
+        "fabric_device_names": list(DCI_FABRIC_DEVICE_NAMES),
+        "expected_as": [device["asn"] for device in devices],
+        "seed_allocations": seed_allocations,
+        "baseline_hostvars": baseline_report["hostvars"],
+        "pipeline_fabric_state": pipeline_fabric_state,
+        "branch_fabric_state": branch_fabric_state,
     }
 
 
-async def _dci_leaf_candidates(client: InfrahubClient, branch: str) -> list[dict]:
+async def _create_dci_branch(client: InfrahubClient, *, expected_origin: str | None) -> None:
+    """Create a dedicated default-based branch; InfraHub 1.11.5 rejects child branches."""
+    branch = await client.branch.create(branch_name=DCI_BRANCH, sync_with_git=False)
+    assert branch.origin_branch == expected_origin, (
+        f"{DCI_BRANCH} originated from {branch.origin_branch!r}, expected default origin {expected_origin!r}"
+    )
+
+
+async def _dci_branch_task_snapshot(client: InfrahubClient, branch: str) -> dict:
+    """Read all tasks on the dedicated DCI branch, including targeted failure logs."""
+    tasks = await client.task.filter(
+        filter=TaskFilter(branch=branch),
+        timeout=READ_TIMEOUT,
+        include_related_nodes=True,
+    )
+    detailed_tasks = []
+    for task in tasks:
+        detailed_task = task
+        if _task_state(task) in {"FAILED", "CRASHED", "CANCELLED"}:
+            detailed_task = await client.task.get(id=task.id, include_logs=True, include_related_nodes=True)
+        detailed_tasks.append(detailed_task)
+    task_failures = [diagnostic for task in detailed_tasks if (diagnostic := task_failure_diagnostic(task)) is not None]
+    task_states = sorted((_rack_task_state(task) for task in detailed_tasks), key=itemgetter("id"))
+    return {"tasks": task_states, "task_failures": task_failures}
+
+
+def _dci_branch_tasks_ready(snapshot: dict) -> bool:
+    """Wait for the DCI branch cascade to finish and fail immediately on task errors."""
+    if snapshot["task_failures"]:
+        raise AssertionError("DCI branch generator tasks failed:\n" + "\n".join(snapshot["task_failures"]))
+    tasks = snapshot["tasks"]
+    return bool(tasks) and all(task["state"] == "COMPLETED" for task in tasks)
+
+
+def _dci_branch_tasks_ready_since(snapshot: dict, prior_task_ids: set[str], target_ids: list[str]) -> bool:
+    """Require fresh completed generator tasks for every explicitly rerun device."""
+    if snapshot["task_failures"]:
+        raise AssertionError("DCI branch generator tasks failed:\n" + "\n".join(snapshot["task_failures"]))
+    tasks = snapshot["tasks"]
+    new_tasks = [task for task in tasks if task["id"] not in prior_task_ids]
+    if not new_tasks or any(task["state"] != "COMPLETED" for task in tasks):
+        return False
+    observed_targets = {target for task in new_tasks for target in task["targets"]}
+    expected_targets = {f"DcimDevice:{target_id}" for target_id in target_ids}
+    return expected_targets <= observed_targets
+
+
+async def _dci_fabric_state(client: InfrahubClient, branch: str) -> dict:
+    """Read the seeded DCI pool references and links for the selected fabric."""
     query = """
-    query DciLeafCandidates {
-      DcimDevice(role__value: "leaf") {
+    query DciFabricState($fabric_name: String!, $pool_name: String!, $seed_link_names: [String!]!) {
+      NetworkFabric(name__value: $fabric_name) {
         edges {
           node {
             id
             name { value }
-            asn { node { asn { value } } }
-            pod { node { parent { node { id name { value } } } } }
+            dci_pool { node { id name { value } } }
+            fabric_ip_pools { edges { node { id name { value } } } }
+          }
+        }
+      }
+      CoreIPPrefixPool(name__value: $pool_name) {
+        edges {
+          node {
+            id
+            name { value }
+            default_prefix_length { value }
+            resources { edges { node { prefix { value } } } }
+          }
+        }
+      }
+      NetworkLink(name__values: $seed_link_names) {
+        edges {
+          node {
+            name { value }
+            connected_endpoints {
+              edges {
+                node {
+                  __typename
+                  ... on InterfacePhysical {
+                    name { value }
+                    device { node { name { value } } }
+                  }
+                }
+              }
+            }
           }
         }
       }
     }
     """
-    resp = await client.execute_graphql(query=query, branch_name=branch)
-    candidates = []
-    seen_fabric_id = None
-    for edge in resp["DcimDevice"]["edges"]:
-        device = edge["node"]
-        fabric = device.get("pod", {}).get("node", {}).get("parent", {}).get("node")
-        if not fabric:
-            continue
-        asn_node = (device.get("asn") or {}).get("node")
-        device_asn = asn_node["asn"]["value"] if asn_node and asn_node.get("asn") else None
-        if device_asn is None:
-            continue
-        if seen_fabric_id is None:
-            seen_fabric_id = fabric["id"]
-        if fabric["id"] != seen_fabric_id:
-            continue
-        candidates.append(
-            {
-                "device_id": device["id"],
-                "device_name": device["name"]["value"],
-                "device_asn": int(device_asn),
-                "fabric_id": fabric["id"],
-                "fabric_name": fabric["name"]["value"],
-                "interface_id": None,
-                "interface_name": DCI_INTERFACE_NAME,
-            }
-        )
-    return sorted(candidates, key=itemgetter("device_name"))
-
-
-async def _ensure_dci_pool(client: InfrahubClient, branch: str, fabric_id: str) -> None:
-    prefix = await client.create(kind="IpamPrefix", branch=branch, prefix=DCI_POOL_PREFIX, role="technical")
-    await prefix.save(allow_upsert=True)
-    pool = await client.create(
-        kind="CoreIPPrefixPool",
-        branch=branch,
-        name=DCI_POOL_NAME,
-        default_member_type="prefix",
-        default_prefix_type="IpamPrefix",
-        default_prefix_length=31,
-        ip_namespace="default",
-        resources=[DCI_POOL_PREFIX],
+    response = await client.execute_graphql(
+        query=query,
+        variables={
+            "fabric_name": DCI_FABRIC_NAME,
+            "pool_name": DCI_POOL_NAME,
+            "seed_link_names": list(DCI_SEED_LINK_ENDPOINTS),
+        },
+        branch_name=branch,
+        timeout=READ_TIMEOUT,
     )
-    await pool.save(allow_upsert=True)
+    fabric_edges = response["NetworkFabric"]["edges"]
+    pool_edges = response["CoreIPPrefixPool"]["edges"]
+    assert len(fabric_edges) == 1, f"{DCI_FABRIC_NAME} is not uniquely readable on {branch}"
+    assert len(pool_edges) == 1, f"{DCI_POOL_NAME} is not unique on {branch}"
 
-    fabric = await client.get(kind="NetworkFabric", id=fabric_id, branch=branch, include=["dci_pool"])
-    fabric.dci_pool = pool
-    await fabric.save(allow_upsert=True)
+    fabric = fabric_edges[0]["node"]
+    dci_pool_node = (fabric.get("dci_pool") or {}).get("node") or {}
+    fabric_ip_pools = sorted(
+        edge["node"]["name"]["value"] for edge in fabric.get("fabric_ip_pools", {}).get("edges", [])
+    )
+    pool = pool_edges[0]["node"]
+    pool_resources = sorted(edge["node"]["prefix"]["value"] for edge in pool.get("resources", {}).get("edges", []))
+    seed_links = {}
+    for edge in response["NetworkLink"]["edges"]:
+        node = edge["node"]
+        link_name = node["name"]["value"]
+        endpoints = set()
+        for endpoint_edge in node.get("connected_endpoints", {}).get("edges", []):
+            endpoint = endpoint_edge.get("node") or {}
+            device = (endpoint.get("device") or {}).get("node") or {}
+            if endpoint.get("__typename") == "InterfacePhysical" and device:
+                endpoints.add((device["name"]["value"], endpoint["name"]["value"]))
+        seed_links[link_name] = endpoints
+
+    return {
+        "fabric_id": fabric["id"],
+        "dci_pool": {
+            "id": dci_pool_node.get("id"),
+            "name": (dci_pool_node.get("name") or {}).get("value"),
+        },
+        "fabric_ip_pools": fabric_ip_pools,
+        "prefix_pool": {
+            "id": pool["id"],
+            "name": pool["name"]["value"],
+            "default_prefix_length": (pool.get("default_prefix_length") or {}).get("value"),
+            "resources": pool_resources,
+        },
+        "seed_links": seed_links,
+    }
+
+
+def _assert_dci_fabric_state(state: dict, *, branch: str) -> None:
+    assert state["dci_pool"] == {
+        "id": state["prefix_pool"]["id"],
+        "name": DCI_POOL_NAME,
+    }, f"{branch} fabric does not point to exactly one seeded DCI pool: {state['dci_pool']}"
+    assert state["prefix_pool"]["default_prefix_length"] == 31, f"{DCI_POOL_NAME} does not allocate /31s on {branch}"
+    assert state["prefix_pool"]["resources"] == [DCI_POOL_RESOURCE], (
+        f"{DCI_POOL_NAME} resources differ on {branch}: {state['prefix_pool']['resources']}"
+    )
+    assert state["fabric_ip_pools"].count(DCI_POOL_NAME) == 1, (
+        f"{DCI_POOL_NAME} is not referenced exactly once by fabric_ip_pools on {branch}: {state['fabric_ip_pools']}"
+    )
+    assert state["seed_links"] == DCI_SEED_LINK_ENDPOINTS, (
+        f"seed DCI links or endpoints differ on {branch}: {state['seed_links']}"
+    )
 
 
 async def _run_generator_for_nodes(
@@ -1649,20 +2563,36 @@ async def _run_generator_for_nodes(
 ) -> None:
     gen_def = await client.get(kind="CoreGeneratorDefinition", name__value=generator_name, branch=branch)
     for node_id in node_ids:
-        await client.execute_graphql(
-            query="""
-            mutation RunGenerator($id: String!, $nodes: [String!]!) {
-                CoreGeneratorDefinitionRun(data: { id: $id, nodes: $nodes }) {
-                    ok
+        try:
+            response = await client.execute_graphql(
+                query="""
+                mutation RunGenerator($id: String!, $nodes: [String!]!) {
+                    CoreGeneratorDefinitionRun(data: { id: $id, nodes: $nodes }) {
+                        ok
+                    }
                 }
-            }
-            """,
-            variables={"id": gen_def.id, "nodes": [node_id]},
-            branch_name=branch,
-        )
+                """,
+                variables={"id": gen_def.id, "nodes": [node_id]},
+                branch_name=branch,
+                timeout=READ_TIMEOUT,
+            )
+        except TimeoutError, httpx.TimeoutException:
+            print(
+                f"launch request timed out for {generator_name} target {node_id} on {branch}; "
+                "observing tasks and outputs before any retry",
+                flush=True,
+            )
+            return
+        result = response["CoreGeneratorDefinitionRun"]
+        assert result["ok"], f"failed to launch {generator_name} on {branch} for target {node_id}: {result}"
 
 
-async def _dci_hostvars_report(client: InfrahubClient, branch: str, device_names: list[str]) -> dict:
+async def _dci_hostvars_report(
+    client: InfrahubClient,
+    branch: str,
+    device_names: list[str],
+    endpoints: list[tuple[str, str]] | None = None,
+) -> dict:
     query = """
     query DciHostvars($names: [String!]) {
       DcimDevice(name__values: $names) {
@@ -1679,7 +2609,12 @@ async def _dci_hostvars_report(client: InfrahubClient, branch: str, device_names
       }
     }
     """
-    resp = await client.execute_graphql(query=query, variables={"names": device_names}, branch_name=branch)
+    resp = await client.execute_graphql(
+        query=query,
+        variables={"names": device_names},
+        branch_name=branch,
+        timeout=READ_TIMEOUT,
+    )
     hostvars = {}
     for edge in resp["DcimDevice"]["edges"]:
         node = edge["node"]
@@ -1693,36 +2628,59 @@ async def _dci_hostvars_report(client: InfrahubClient, branch: str, device_names
         )
         if not storage_id:
             continue
-        hostvars[node["name"]["value"]] = json.loads(await client.object_store.get(identifier=storage_id))
+        content = await asyncio.wait_for(client.object_store.get(identifier=storage_id), timeout=READ_TIMEOUT)
+        hostvars[node["name"]["value"]] = json.loads(content)
 
-    matching_links = []
+    hostvars = dict(sorted(hostvars.items()))
+    all_links = []
     for device_hostvars in hostvars.values():
-        matching_links.extend(
-            link
-            for link in device_hostvars.get("l3_edge", {}).get("p2p_links", [])
-            if link.get("nodes") == device_names or link.get("nodes") == list(reversed(device_names))
-        )
+        all_links.extend(link for link in device_hostvars.get("l3_edge", {}).get("p2p_links", []))
 
-    unique_matching_links = list(
-        {
-            (
-                tuple(link.get("nodes", [])),
-                tuple(link.get("interfaces", [])),
-                tuple(link.get("as", [])),
-                tuple(link.get("ip", [])),
-                link.get("include_in_underlay_protocol"),
-                link.get("speed"),
-            ): link
-            for link in matching_links
-        }.values()
-    )
+    links_by_identity = {_dci_link_identity(link): link for link in all_links}
+    unique_links = [links_by_identity[identity] for identity in sorted(links_by_identity, key=repr)]
+    unique_matching_links = [
+        link for link in unique_links if endpoints is None or dci_link_matches_endpoints(link, endpoints)
+    ]
 
     return {
         "ready": set(hostvars) == set(device_names),
         "hostvars": hostvars,
-        "matching_links": matching_links,
+        "links": unique_links,
         "unique_matching_links": unique_matching_links,
     }
+
+
+def _dci_link_identity(link: dict) -> tuple:
+    """Return an endpoint-order-independent identity for one rendered DCI p2p link."""
+    nodes = link.get("nodes", [])
+    interfaces = link.get("interfaces", [])
+    as_values = link.get("as", [])
+    ip_addresses = link.get("ip", [])
+    if (
+        isinstance(nodes, list)
+        and isinstance(interfaces, list)
+        and isinstance(as_values, list)
+        and isinstance(ip_addresses, list)
+        and len(nodes) == len(interfaces) == len(as_values) == len(ip_addresses)
+    ):
+        endpoint_data = tuple(
+            sorted(zip(nodes, interfaces, as_values, ip_addresses, strict=True), key=itemgetter(0, 1))
+        )
+        return (
+            endpoint_data,
+            link.get("include_in_underlay_protocol"),
+            link.get("profile"),
+            link.get("speed"),
+        )
+    return (
+        tuple(nodes) if isinstance(nodes, list) else nodes,
+        tuple(interfaces) if isinstance(interfaces, list) else interfaces,
+        tuple(as_values) if isinstance(as_values, list) else as_values,
+        tuple(ip_addresses) if isinstance(ip_addresses, list) else ip_addresses,
+        link.get("include_in_underlay_protocol"),
+        link.get("profile"),
+        link.get("speed"),
+    )
 
 
 async def _trigger_all_artifacts(client: InfrahubClient, branch: str, definitions: list) -> None:
@@ -1768,28 +2726,37 @@ async def _fetch_ready_artifact_contents_by_target(
     client: InfrahubClient,
     branch: str,
     artifact_name: str,
+    target_ids_by_name: dict[str, str],
 ) -> dict[str, str]:
-    """Return Ready artifact contents keyed by target display label."""
-    query = (
-        "query {\n"
-        f'  CoreArtifact(name__value: "{artifact_name}") {{\n'
-        "    edges { node {\n"
-        "      status { value }\n"
-        "      storage_id { value }\n"
-        "      object { node { display_label } }\n"
-        "    } }\n"
-        "  }\n"
-        "}"
+    """Read Ready artifacts only for the requested device IDs."""
+    query = """
+    query ReadyArtifactsByTarget($artifact_name: String!, $target_ids: [ID]) {
+      CoreArtifact(name__value: $artifact_name, object__ids: $target_ids) {
+        edges {
+          node {
+            status { value }
+            storage_id { value }
+            object { node { id display_label } }
+          }
+        }
+      }
+    }
+    """
+    response = await client.execute_graphql(
+        query=query,
+        variables={"artifact_name": artifact_name, "target_ids": list(target_ids_by_name.values())},
+        branch_name=branch,
+        timeout=READ_TIMEOUT,
     )
-    response = await client.execute_graphql(query=query, branch_name=branch)
     contents: dict[str, str] = {}
+    target_names_by_id = {node_id: name for name, node_id in target_ids_by_name.items()}
     for edge in response["CoreArtifact"]["edges"]:
         node = edge["node"]
         if node.get("status", {}).get("value") != "Ready":
             continue
         storage_id = node.get("storage_id", {}).get("value")
         target = (node.get("object") or {}).get("node") or {}
-        target_name = target.get("display_label")
+        target_name = target_names_by_id.get(target.get("id"))
         if storage_id and target_name:
             contents[target_name] = await client.object_store.get(identifier=storage_id)
     return contents
@@ -1824,7 +2791,7 @@ async def _fabric_device_ids_by_name(
       }
     }
     """
-    response = await client.execute_graphql(query=query, branch_name=branch)
+    response = await client.execute_graphql(query=query, branch_name=branch, timeout=READ_TIMEOUT)
     devices: dict[str, str] = {}
     for edge in response["DcimDevice"]["edges"]:
         node = edge["node"]
