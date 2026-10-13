@@ -31,6 +31,7 @@ import asyncio
 import json
 import os
 import shlex
+import time
 from ipaddress import IPv4Interface, IPv4Network
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any
@@ -62,6 +63,7 @@ from .helpers import (
     READ_TIMEOUT,
     REPO_SYNC_INTERVAL,
     REPO_SYNC_RETRIES,
+    _retry_transient_request,
     dci_allocation_mismatches,
     dci_link_matches_endpoints,
     device_design_mismatches,
@@ -81,6 +83,7 @@ if TYPE_CHECKING:
 REPO_NAME = "e2e-repository"
 # The cascade runs on this branch; trigger rules only fire off `main`.
 PIPELINE_BRANCH = "e2e-pipeline"
+DCI_BRANCH = "e2e-dci-multi-domain"
 GENERATOR_AVD_HOSTVAR = "generate-avd-device-hostvar"
 SERVER_CABLING_RACK = "Rack-B2-1"
 SERVER_CABLING_SERVER = "e2e-server-b2-1"
@@ -517,7 +520,12 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         )
         assert report["leaf_port_channel_count"] == 2
         assert report["leaf_port_channel_member_count"] == 2
-        assert report["leaf_port_channel_ids"] == [1117, 1117]
+        assert report["leaf_port_channel_device_names"] == list(SERVER_CABLING_LEAF_NAMES)
+        assert report["leaf_port_channel_link_ids"] == report["server_link_ids"]
+        assert all(
+            lag["name"] == f"Port-Channel{lag['channel_id']}" and len(lag["server_link_ids"]) == 1
+            for lag in report["leaf_port_channels"]
+        )
         print(f"server cabling report: {report}", flush=True)
 
     # --- Component 11: AVD structured config (via trigger cascade) ---------
@@ -642,9 +650,10 @@ class TestE2EPipeline(TestInfrahubDockerClient):
     async def test_dci_link_generates_l3_edge_hostvars(self, client: InfrahubClient) -> None:
         """The selected Multi-Domain Border Leafs render and retain a pooled DCI link."""
         setup = await _create_dci_link_scenario(client)
+        dci_branch = setup["branch"]
         await _run_generator_for_nodes_sequentially(
             client,
-            PIPELINE_BRANCH,
+            dci_branch,
             GENERATOR_AVD_HOSTVAR,
             setup["device_ids"],
             describe=f"DCI hostvar generator for {DCI_LINK_NAME}",
@@ -653,7 +662,7 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         report = await wait_until_stable(
             fetch=lambda: _dci_hostvars_report(
                 client,
-                PIPELINE_BRANCH,
+                dci_branch,
                 setup["fabric_device_names"],
                 setup["endpoints"],
             ),
@@ -664,9 +673,8 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         )
 
         link = report["unique_matching_links"][0]
-        assert link["nodes"] == setup["device_names"]
-        assert link["interfaces"] == setup["interface_names"]
-        assert link["as"] == setup["expected_as"]
+        assert sorted(zip(link["nodes"], link["interfaces"], strict=True)) == setup["endpoints"]
+        assert dict(zip(link["nodes"], link["as"], strict=True)) == setup["expected_as_by_device"]
         mismatches = dci_allocation_mismatches(
             link["ip"],
             DCI_POOL_RESOURCE,
@@ -690,10 +698,10 @@ class TestE2EPipeline(TestInfrahubDockerClient):
                     f"{device_name} lost a seeded l3_edge link: {seed_link}"
                 )
 
-        first_allocation = list(link["ip"])
+        first_allocation = _dci_link_identity(link)
         await _run_generator_for_nodes_sequentially(
             client,
-            PIPELINE_BRANCH,
+            dci_branch,
             GENERATOR_AVD_HOSTVAR,
             setup["device_ids"],
             describe=f"DCI hostvar rerun for {DCI_LINK_NAME}",
@@ -701,7 +709,7 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         rerun = await wait_until_stable(
             fetch=lambda: _dci_hostvars_report(
                 client,
-                PIPELINE_BRANCH,
+                dci_branch,
                 setup["fabric_device_names"],
                 setup["endpoints"],
             ),
@@ -710,12 +718,17 @@ class TestE2EPipeline(TestInfrahubDockerClient):
             interval=POLL_INTERVAL,
             describe=f"stable DCI allocation for {DCI_LINK_NAME} after rerun",
         )
-        assert rerun["unique_matching_links"][0]["ip"] == first_allocation
+        assert _dci_link_identity(rerun["unique_matching_links"][0]) == first_allocation
 
-        final_dci_state = await _dci_fabric_state(client, PIPELINE_BRANCH)
-        _assert_dci_fabric_state(final_dci_state, branch=PIPELINE_BRANCH)
-        assert final_dci_state == setup["pipeline_fabric_state"], (
-            f"DCI pool references or seeded links changed on {PIPELINE_BRANCH}: {final_dci_state}"
+        final_dci_state = await _dci_fabric_state(client, dci_branch)
+        _assert_dci_fabric_state(final_dci_state, branch=dci_branch)
+        assert final_dci_state == setup["dci_fabric_state"], (
+            f"DCI pool references or seeded links changed on {dci_branch}: {final_dci_state}"
+        )
+        pipeline_dci_state = await _dci_fabric_state(client, PIPELINE_BRANCH)
+        _assert_dci_fabric_state(pipeline_dci_state, branch=PIPELINE_BRANCH)
+        assert pipeline_dci_state == setup["pipeline_fabric_state"], (
+            f"DCI scenario modified {PIPELINE_BRANCH}: {pipeline_dci_state}"
         )
         print(f"dci hostvars report: {report}", flush=True)
 
@@ -723,7 +736,10 @@ class TestE2EPipeline(TestInfrahubDockerClient):
     @pytest.mark.asyncio(loop_scope="class")
     async def test_artifacts_generated(self, client: InfrahubClient) -> None:
         """Every AVD artifact definition yields at least one Ready artifact on the branch (FR-011/FR-013)."""
-        definitions = await client.all(kind="CoreArtifactDefinition", branch=PIPELINE_BRANCH)
+        definitions = await _retry_transient_request(
+            lambda: client.all(kind="CoreArtifactDefinition", branch=PIPELINE_BRANCH),
+            deadline=time.monotonic() + READ_TIMEOUT,
+        )
         assert definitions, "no artifact definitions registered (repository sync incomplete?)"
         await _trigger_all_artifacts(client, PIPELINE_BRANCH, definitions)
 
@@ -744,7 +760,10 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         eos_content = next(content for content in eos_contents if "hostname" in content)
         assert eos_content.strip(), "EOS configuration artifact is empty"
 
-        anta_content, _ = await _fetch_ready_artifact_content(client, PIPELINE_BRANCH, ARTIFACT_AVD_ANTA_CATALOG)
+        anta_content, _ = await _retry_transient_request(
+            lambda: _fetch_ready_artifact_content(client, PIPELINE_BRANCH, ARTIFACT_AVD_ANTA_CATALOG),
+            deadline=time.monotonic() + READ_TIMEOUT,
+        )
         assert anta_content and anta_content.strip(), "ANTA catalog artifact is empty"
         assert ANTA_DISABLED_MARKER not in anta_content, (
             "ANTA catalog rendered the disabled marker despite anta_enabled"
@@ -754,15 +773,18 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         # EOS/ANTA artifacts, does not auto-cascade on the branch — so generate it
         # explicitly for each fabric target on the branch, then read a populated
         # render (this also proves the transform renders server-side on a branch).
-        definitions = await client.all(kind="CoreArtifactDefinition", branch=PIPELINE_BRANCH)
+        definitions = await _retry_transient_request(
+            lambda: client.all(kind="CoreArtifactDefinition", branch=PIPELINE_BRANCH),
+            deadline=time.monotonic() + READ_TIMEOUT,
+        )
         clab_def = next((d for d in definitions if d.artifact_name.value == ARTIFACT_CONTAINERLAB_TOPOLOGY), None)
         assert clab_def, "ContainerLab Topology artifact definition not registered"
-        for fabric in await client.all(kind="NetworkFabric", branch=PIPELINE_BRANCH):
-            resp = await client._post(
-                f"{client.address}/api/artifact/generate/{clab_def.id}?branch={PIPELINE_BRANCH}",
-                payload={"nodes": [fabric.id]},
-            )
-            resp.raise_for_status()
+        fabrics = await _retry_transient_request(
+            lambda: client.all(kind="NetworkFabric", branch=PIPELINE_BRANCH),
+            deadline=time.monotonic() + READ_TIMEOUT,
+        )
+        for fabric in fabrics:
+            await _trigger_artifact_generation(client, clab_def.id, PIPELINE_BRANCH, [fabric.id])
 
         def _has_populated_topology(contents: list[str]) -> bool:
             for content in contents:
@@ -798,10 +820,13 @@ class TestE2EPipeline(TestInfrahubDockerClient):
     @pytest.mark.asyncio(loop_scope="class")
     async def test_proposed_change_refreshes_anta_catalogs_for_fabric_flag(self, client: InfrahubClient) -> None:
         """Enabling ANTA on a generated fabric refreshes its device catalogs in the proposed change."""
-        fabric = await client.get(
-            kind="NetworkFabric",
-            name__value=PROPOSED_CHANGE_ANTA_FABRIC,
-            branch=PIPELINE_BRANCH,
+        fabric = await _retry_transient_request(
+            lambda: client.get(
+                kind="NetworkFabric",
+                name__value=PROPOSED_CHANGE_ANTA_FABRIC,
+                branch=PIPELINE_BRANCH,
+            ),
+            deadline=time.monotonic() + READ_TIMEOUT,
         )
         device_ids_by_name = await _fabric_device_ids_by_name(
             client,
@@ -810,10 +835,13 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         )
         assert device_ids_by_name, f"{PROPOSED_CHANGE_ANTA_FABRIC} has no generated devices"
 
-        definition = await client.get(
-            kind="CoreArtifactDefinition",
-            name__value="avd_anta_catalog",
-            branch=PIPELINE_BRANCH,
+        definition = await _retry_transient_request(
+            lambda: client.get(
+                kind="CoreArtifactDefinition",
+                name__value="avd_anta_catalog",
+                branch=PIPELINE_BRANCH,
+            ),
+            deadline=time.monotonic() + READ_TIMEOUT,
         )
 
         # Establish disabled-marker catalogs before the proposed change. This
@@ -821,11 +849,12 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         # proposed-change artifact validator actually re-rendered the devices.
         fabric.anta_enabled.value = False
         await fabric.save()
-        response = await client._post(
-            f"{client.address}/api/artifact/generate/{definition.id}?branch={PIPELINE_BRANCH}",
-            payload={"nodes": list(device_ids_by_name.values())},
+        await _trigger_artifact_generation(
+            client,
+            definition.id,
+            PIPELINE_BRANCH,
+            list(device_ids_by_name.values()),
         )
-        response.raise_for_status()
         disabled_catalogs = await wait_until(
             fetch=lambda: _fetch_ready_artifact_contents_by_target(
                 client,
@@ -1262,6 +1291,7 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
                       node {
                         __typename
                         ... on NetworkLink {
+                          id
                           name { value }
                           medium { value }
                           role { value }
@@ -1286,17 +1316,26 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
           }
         }
       }
-      InterfaceLag(device__ids: $leaf_ids, name__value: "Port-Channel1117") {
+      InterfaceLag(device__ids: $leaf_ids) {
         edges {
           node {
             name { value }
             channel_id { value }
-            device { node { name { value } } }
+            device { node { id name { value } } }
             lag_members {
               edges {
                 node {
+                  __typename
                   name { value }
-                  device { node { name { value } } }
+                  device { node { id name { value } } }
+                  ... on InterfacePhysical {
+                    connector {
+                      node {
+                        __typename
+                        ... on NetworkLink { id }
+                      }
+                    }
+                  }
                 }
               }
             }
@@ -1309,6 +1348,7 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
         query=query,
         variables={"server": server_name, "leaf_ids": leaf_ids},
         branch_name=branch,
+        timeout=READ_TIMEOUT,
     )
 
     server_edges = resp["ComputePhysicalServer"]["edges"]
@@ -1324,6 +1364,10 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
             "leaf_port_channel_count": 0,
             "leaf_port_channel_member_count": 0,
             "leaf_port_channel_ids": [],
+            "leaf_port_channel_device_names": [],
+            "leaf_port_channel_link_ids": [],
+            "leaf_port_channels": [],
+            "server_link_ids": [],
         }
 
     physical_interfaces = []
@@ -1361,14 +1405,33 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
         member_edge["node"]["name"]["value"] for bond in server_bonds for member_edge in bond["lag_members"]["edges"]
     )
 
+    server_link_ids = sorted({link["id"] for link in server_links if link.get("id")})
+    server_link_id_set = set(server_link_ids)
     leaf_port_channels = []
     for edge in resp["InterfaceLag"]["edges"]:
         node = edge["node"]
-        if node["name"]["value"] != "Port-Channel1117":
-            continue
-        device_name = node.get("device", {}).get("node", {}).get("name", {}).get("value")
-        if device_name in {"leaf-pod-b2-1-1", "leaf-pod-b2-1-2"}:
-            leaf_port_channels.append(node)
+        device = node.get("device", {}).get("node") or {}
+        server_member_link_ids = sorted(
+            {
+                connector["id"]
+                for member_edge in node.get("lag_members", {}).get("edges", [])
+                for member in [member_edge["node"]]
+                for connector in [(member.get("connector") or {}).get("node") or {}]
+                if connector.get("__typename") == "NetworkLink" and connector.get("id") in server_link_id_set
+            }
+        )
+        if server_member_link_ids:
+            leaf_port_channels.append(
+                {
+                    "name": node["name"]["value"],
+                    "channel_id": (node.get("channel_id") or {}).get("value"),
+                    "device_name": (device.get("name") or {}).get("value"),
+                    "member_count": len(node.get("lag_members", {}).get("edges", [])),
+                    "server_link_ids": server_member_link_ids,
+                }
+            )
+    leaf_port_channels.sort(key=itemgetter("device_name", "name"))
+    leaf_port_channel_link_ids = sorted({link_id for lag in leaf_port_channels for link_id in lag["server_link_ids"]})
 
     return {
         "server_link_count": len(server_links),
@@ -1379,8 +1442,12 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
         "server_bond_count": len(server_bonds),
         "server_bond_members": server_bond_members,
         "leaf_port_channel_count": len(leaf_port_channels),
-        "leaf_port_channel_member_count": sum(len(lag["lag_members"]["edges"]) for lag in leaf_port_channels),
-        "leaf_port_channel_ids": sorted(lag["channel_id"]["value"] for lag in leaf_port_channels),
+        "leaf_port_channel_member_count": sum(lag["member_count"] for lag in leaf_port_channels),
+        "leaf_port_channel_ids": sorted(lag["channel_id"] for lag in leaf_port_channels),
+        "leaf_port_channel_device_names": [lag["device_name"] for lag in leaf_port_channels],
+        "leaf_port_channel_link_ids": leaf_port_channel_link_ids,
+        "leaf_port_channels": leaf_port_channels,
+        "server_link_ids": server_link_ids,
     }
 
 
@@ -2312,14 +2379,15 @@ def _snapshot_list_items(values: list[Any]) -> dict[tuple[str, ...], Any] | None
 
 
 async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
-    """Create the test link on e2e-pipeline, already converged in the disposable stack.
+    """Create the test link in an isolated branch after the pipeline has converged.
 
-    The pinned BranchCreate mutation cannot select a non-default source branch.
-    Reuse this isolated test branch instead of rebuilding from default.
+    InfraHub 1.11.5 only permits creating branches from the default branch. The
+    dedicated DCI branch therefore starts from the same seeded data and renders
+    its own baseline hostvars before adding the test link.
     """
     pipeline_fabric_state = await _dci_fabric_state(client, PIPELINE_BRANCH)
     _assert_dci_fabric_state(pipeline_fabric_state, branch=PIPELINE_BRANCH)
-    prior_tasks = await wait_until_stable(
+    await wait_until_stable(
         fetch=lambda: _branch_task_snapshot(client, PIPELINE_BRANCH),
         ready=_branch_tasks_idle,
         timeout=GENERATOR_TIMEOUT,
@@ -2333,12 +2401,54 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
             for endpoints in DCI_SEED_LINK_ENDPOINTS.values()
         )
 
-    seed_hostvars = await wait_until_stable(
+    await wait_until_stable(
         fetch=lambda: _dci_hostvars_report(client, PIPELINE_BRANCH, list(DCI_FABRIC_DEVICE_NAMES)),
         ready=seeded_hostvars_ready,
         timeout=GENERATOR_TIMEOUT,
         interval=POLL_INTERVAL,
         describe=f"stable seed DCI hostvars on {PIPELINE_BRANCH}",
+    )
+
+    await client.branch.create(branch_name=DCI_BRANCH, sync_with_git=False)
+    dci_fabric_state = await _dci_fabric_state(client, DCI_BRANCH)
+    _assert_dci_fabric_state(dci_fabric_state, branch=DCI_BRANCH)
+    assert dci_fabric_state == pipeline_fabric_state, (
+        f"seeded DCI fabric differs between {PIPELINE_BRANCH} and {DCI_BRANCH}: "
+        f"pipeline={pipeline_fabric_state}, DCI={dci_fabric_state}"
+    )
+
+    fabric_device_ids = await _fabric_device_ids_by_name(client, DCI_BRANCH, DCI_FABRIC_NAME)
+    missing_fabric_devices = sorted(set(DCI_FABRIC_DEVICE_NAMES) - set(fabric_device_ids))
+    assert not missing_fabric_devices, f"seeded DCI devices are missing on {DCI_BRANCH}: {missing_fabric_devices}"
+
+    dci_branch_tasks = await wait_until_stable(
+        fetch=lambda: _branch_task_snapshot(client, DCI_BRANCH),
+        ready=_branch_tasks_idle,
+        timeout=GENERATOR_TIMEOUT,
+        interval=POLL_INTERVAL,
+        describe=f"{DCI_BRANCH} tasks before baseline hostvar generation",
+    )
+    prior_dci_task_ids = {task["id"] for task in dci_branch_tasks["tasks"]}
+    await _run_generator_for_nodes_sequentially(
+        client,
+        DCI_BRANCH,
+        GENERATOR_AVD_HOSTVAR,
+        [fabric_device_ids[name] for name in DCI_FABRIC_DEVICE_NAMES],
+        describe=f"seed DCI hostvar generation on {DCI_BRANCH}",
+    )
+    dci_branch_tasks = await wait_until_stable(
+        fetch=lambda: _branch_task_snapshot(client, DCI_BRANCH, known_task_ids=prior_dci_task_ids),
+        ready=lambda snapshot: _branch_tasks_ready_since(snapshot, prior_dci_task_ids),
+        timeout=GENERATOR_TIMEOUT,
+        interval=POLL_INTERVAL,
+        describe=f"{DCI_BRANCH} seed DCI hostvar generator tasks",
+    )
+    seed_hostvars = await wait_until_stable(
+        fetch=lambda: _dci_hostvars_report(client, DCI_BRANCH, list(DCI_FABRIC_DEVICE_NAMES)),
+        ready=seeded_hostvars_ready,
+        timeout=GENERATOR_TIMEOUT,
+        interval=POLL_INTERVAL,
+        describe=f"stable seed DCI hostvars on {DCI_BRANCH}",
     )
 
     query = """
@@ -2365,11 +2475,14 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
       }
     }
     """
-    response = await client.execute_graphql(
-        query=query,
-        variables={"device_names": list(DCI_DEVICE_NAMES)},
-        branch_name=PIPELINE_BRANCH,
-        timeout=READ_TIMEOUT,
+    response = await _retry_transient_request(
+        lambda: client.execute_graphql(
+            query=query,
+            variables={"device_names": list(DCI_DEVICE_NAMES)},
+            branch_name=DCI_BRANCH,
+            timeout=READ_TIMEOUT,
+        ),
+        deadline=time.monotonic() + READ_TIMEOUT,
     )
     devices = []
     for edge in response["DcimDevice"]["edges"]:
@@ -2378,7 +2491,7 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
         asn_node = (node.get("asn") or {}).get("node") or {}
         asn = (asn_node.get("asn") or {}).get("value")
         assert node["role"]["value"] == "border_leaf", f"{node['name']['value']} lost its border_leaf role"
-        assert fabric.get("id") == pipeline_fabric_state["fabric_id"], (
+        assert fabric.get("id") == dci_fabric_state["fabric_id"], (
             f"{node['name']['value']} does not belong to selected fabric {DCI_FABRIC_NAME}"
         )
         assert fabric.get("name", {}).get("value") == DCI_FABRIC_NAME, (
@@ -2401,8 +2514,6 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
         f"observed {[device['device_name'] for device in devices]}"
     )
     assert len({device["fabric_id"] for device in devices}) == 1
-    assert len({device["asn_id"] for device in devices}) == 1, f"DCI endpoints do not share an ASN: {devices}"
-
     seed_links = []
     for seed_link_name, seed_endpoints in DCI_SEED_LINK_ENDPOINTS.items():
         matches = [link for link in seed_hostvars["links"] if dci_link_matches_endpoints(link, list(seed_endpoints))]
@@ -2419,12 +2530,15 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
     baseline_report = seed_hostvars
     assert baseline_report["ready"], f"selected DCI branch hostvars are incomplete: {baseline_report}"
 
-    existing_links = await client.filters(kind="NetworkLink", name__value=DCI_LINK_NAME, branch=PIPELINE_BRANCH)
-    assert not existing_links, f"test DCI link {DCI_LINK_NAME} already exists on {PIPELINE_BRANCH}"
+    existing_links = await _retry_transient_request(
+        lambda: client.filters(kind="NetworkLink", name__value=DCI_LINK_NAME, branch=DCI_BRANCH),
+        deadline=time.monotonic() + READ_TIMEOUT,
+    )
+    assert not existing_links, f"test DCI link {DCI_LINK_NAME} already exists on {DCI_BRANCH}"
 
     dci_link = await client.create(
         kind="NetworkLink",
-        branch=PIPELINE_BRANCH,
+        branch=DCI_BRANCH,
         name=DCI_LINK_NAME,
         medium="smf",
         role="dci",
@@ -2434,38 +2548,44 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
 
     endpoints = [(device["device_name"], DCI_INTERFACE_NAME) for device in devices]
     for device in devices:
-        existing = await client.filters(
-            kind="InterfacePhysical",
-            name__value=DCI_INTERFACE_NAME,
-            device__ids=[device["device_id"]],
-            branch=PIPELINE_BRANCH,
+        existing = await _retry_transient_request(
+            lambda device_id=device["device_id"]: client.filters(
+                kind="InterfacePhysical",
+                name__value=DCI_INTERFACE_NAME,
+                device__ids=[device_id],
+                branch=DCI_BRANCH,
+            ),
+            deadline=time.monotonic() + READ_TIMEOUT,
         )
         assert not existing, f"{device['device_name']} already has {DCI_INTERFACE_NAME}"
         dci_interface = await client.create(
             kind="InterfacePhysical",
-            branch=PIPELINE_BRANCH,
+            branch=DCI_BRANCH,
             name=DCI_INTERFACE_NAME,
             device={"id": device["device_id"]},
             role="peering",
         )
         await dci_interface.save(allow_upsert=True)
-        interface = await client.get(
-            kind="InterfacePhysical",
-            id=dci_interface.id,
-            branch=PIPELINE_BRANCH,
-            include=["connector"],
+        interface = await _retry_transient_request(
+            lambda interface_id=dci_interface.id: client.get(
+                kind="InterfacePhysical",
+                id=interface_id,
+                branch=DCI_BRANCH,
+                include=["connector"],
+            ),
+            deadline=time.monotonic() + READ_TIMEOUT,
         )
         interface.connector = dci_link
         interface.status.value = "active"
         await interface.save(allow_upsert=True)
 
-    prior_task_ids = {task["id"] for task in prior_tasks["tasks"]}
+    prior_task_ids = {task["id"] for task in dci_branch_tasks["tasks"]}
     setup_tasks = await wait_until_stable(
-        fetch=lambda: _branch_task_snapshot(client, PIPELINE_BRANCH, known_task_ids=prior_task_ids),
+        fetch=lambda: _branch_task_snapshot(client, DCI_BRANCH, known_task_ids=prior_task_ids),
         ready=_branch_tasks_idle,
         timeout=GENERATOR_TIMEOUT,
         interval=POLL_INTERVAL,
-        describe=f"{PIPELINE_BRANCH} tasks after creating {DCI_LINK_NAME}",
+        describe=f"{DCI_BRANCH} tasks after creating {DCI_LINK_NAME}",
     )
     setup_failures = [
         failure["diagnostic"] for failure in setup_tasks["task_failures"] if failure["id"] not in prior_task_ids
@@ -2474,15 +2594,17 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
         raise AssertionError("DCI link setup tasks failed:\n" + "\n".join(setup_failures))
 
     return {
+        "branch": DCI_BRANCH,
         "device_ids": [device["device_id"] for device in devices],
         "device_names": [device["device_name"] for device in devices],
         "interface_names": [interface for _, interface in endpoints],
         "endpoints": endpoints,
         "fabric_device_names": list(DCI_FABRIC_DEVICE_NAMES),
-        "expected_as": [device["asn"] for device in devices],
+        "expected_as_by_device": {device["device_name"]: device["asn"] for device in devices},
         "seed_allocations": seed_allocations,
         "baseline_hostvars": baseline_report["hostvars"],
         "pipeline_fabric_state": pipeline_fabric_state,
+        "dci_fabric_state": dci_fabric_state,
     }
 
 
@@ -2530,15 +2652,18 @@ async def _dci_fabric_state(client: InfrahubClient, branch: str) -> dict:
       }
     }
     """
-    response = await client.execute_graphql(
-        query=query,
-        variables={
-            "fabric_name": DCI_FABRIC_NAME,
-            "pool_name": DCI_POOL_NAME,
-            "seed_link_names": list(DCI_SEED_LINK_ENDPOINTS),
-        },
-        branch_name=branch,
-        timeout=READ_TIMEOUT,
+    response = await _retry_transient_request(
+        lambda: client.execute_graphql(
+            query=query,
+            variables={
+                "fabric_name": DCI_FABRIC_NAME,
+                "pool_name": DCI_POOL_NAME,
+                "seed_link_names": list(DCI_SEED_LINK_ENDPOINTS),
+            },
+            branch_name=branch,
+            timeout=READ_TIMEOUT,
+        ),
+        deadline=time.monotonic() + READ_TIMEOUT,
     )
     fabric_edges = response["NetworkFabric"]["edges"]
     pool_edges = response["CoreIPPrefixPool"]["edges"]
@@ -2601,7 +2726,10 @@ def _assert_dci_fabric_state(state: dict, *, branch: str) -> None:
 async def _run_generator_for_nodes(
     client: InfrahubClient, branch: str, generator_name: str, node_ids: list[str]
 ) -> None:
-    gen_def = await client.get(kind="CoreGeneratorDefinition", name__value=generator_name, branch=branch)
+    gen_def = await _retry_transient_request(
+        lambda: client.get(kind="CoreGeneratorDefinition", name__value=generator_name, branch=branch),
+        deadline=time.monotonic() + READ_TIMEOUT,
+    )
     for node_id in node_ids:
         try:
             response = await client.execute_graphql(
@@ -2863,7 +2991,10 @@ async def _fabric_device_ids_by_name(
       }
     }
     """
-    response = await client.execute_graphql(query=query, branch_name=branch, timeout=READ_TIMEOUT)
+    response = await _retry_transient_request(
+        lambda: client.execute_graphql(query=query, branch_name=branch, timeout=READ_TIMEOUT),
+        deadline=time.monotonic() + READ_TIMEOUT,
+    )
     devices: dict[str, str] = {}
     for edge in response["DcimDevice"]["edges"]:
         node = edge["node"]
@@ -2873,6 +3004,26 @@ async def _fabric_device_ids_by_name(
         if (parent.get("name") or {}).get("value") == fabric_name:
             devices[node["name"]["value"]] = node["id"]
     return devices
+
+
+async def _trigger_artifact_generation(
+    client: InfrahubClient,
+    definition_id: str,
+    branch: str,
+    node_ids: list[str],
+) -> None:
+    """Trigger one artifact render, retrying only bounded transient responses."""
+
+    async def request() -> httpx.Response:
+        response = await client._post(
+            url=f"{client.address}/api/artifact/generate/{definition_id}?branch={branch}",
+            payload={"nodes": node_ids},
+            timeout=READ_TIMEOUT,
+        )
+        response.raise_for_status()
+        return response
+
+    await _retry_transient_request(request, deadline=time.monotonic() + READ_TIMEOUT)
 
 
 async def _fetch_ready_artifact_content(
