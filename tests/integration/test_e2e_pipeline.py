@@ -85,7 +85,7 @@ GENERATOR_AVD_HOSTVAR = "generate-avd-device-hostvar"
 SERVER_CABLING_RACK = "Rack-B2-1"
 SERVER_CABLING_SERVER = "e2e-server-b2-1"
 SERVER_CABLING_TEMPLATE = "multipod-b-compute-server-dual"
-DCI_BRANCH = "e2e-dci-multi-domain"
+SERVER_CABLING_LEAF_NAMES = ("leaf-pod-b2-1-1", "leaf-pod-b2-1-2")
 DCI_FABRIC_NAME = "Fabric-L3LS-Multi-Domain"
 DCI_FABRIC_DEVICE_NAMES = (
     "leaf-infrahub-dc1-1-1",
@@ -437,7 +437,7 @@ class TestE2EPipeline(TestInfrahubDockerClient):
     @pytest.mark.asyncio(loop_scope="class")
     async def test_server_cabling_trigger_creates_links_and_lags(self, client: InfrahubClient) -> None:
         """Creating a server in the servers group triggers server cabling and creates links/LAGs."""
-        await wait_until(
+        prerequisites = await wait_until(
             fetch=lambda: _server_cabling_prerequisites(client, PIPELINE_BRANCH),
             ready=lambda r: (
                 r["rack_complete"]
@@ -449,6 +449,15 @@ class TestE2EPipeline(TestInfrahubDockerClient):
             interval=POLL_INTERVAL,
             describe=f"{SERVER_CABLING_RACK} leaves and server-role ports",
         )
+
+        prior_tasks = await wait_until(
+            fetch=lambda: _branch_task_snapshot(client, PIPELINE_BRANCH),
+            ready=_branch_tasks_idle,
+            timeout=GENERATOR_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe=f"{PIPELINE_BRANCH} tasks before server-cabling trigger",
+        )
+        prior_task_ids = {task["id"] for task in prior_tasks["tasks"]}
 
         rack = await client.get(kind="LocationRack", name__value=SERVER_CABLING_RACK, branch=PIPELINE_BRANCH)
         template = await client.get(
@@ -467,8 +476,21 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         )
         await server.save(allow_upsert=True)
 
+        await wait_until_stable(
+            fetch=lambda: _branch_task_snapshot(client, PIPELINE_BRANCH, known_task_ids=prior_task_ids),
+            ready=lambda snapshot: _branch_tasks_ready_since(snapshot, prior_task_ids),
+            timeout=GENERATOR_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe=f"{PIPELINE_BRANCH} server-cabling and leaf cascade tasks",
+        )
+
         report = await wait_until(
-            fetch=lambda: _server_cabling_report(client, PIPELINE_BRANCH, SERVER_CABLING_SERVER),
+            fetch=lambda: _server_cabling_report(
+                client,
+                PIPELINE_BRANCH,
+                SERVER_CABLING_SERVER,
+                prerequisites["leaf_ids"],
+            ),
             ready=lambda r: (
                 r["server_link_count"] == 2
                 and r["server_physical_count"] == 2
@@ -560,18 +582,32 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         rack_ids = [rack_id for _, rack_id in rack_targets]
         device_ids = await _rack_device_ids(client, PIPELINE_BRANCH, rack_ids)
         assert device_ids, "no generated devices belong to the rack rerun targets"
-        task_target_ids = sorted(set(rack_ids + device_ids))
+        branch_tasks = await wait_until_stable(
+            fetch=lambda: _branch_task_snapshot(client, PIPELINE_BRANCH),
+            ready=_branch_tasks_idle,
+            timeout=GENERATOR_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe=f"all {PIPELINE_BRANCH} tasks before rack reruns",
+        )
+        prior_task_ids = {task["id"] for task in branch_tasks["tasks"]}
+        baseline = await wait_until_stable(
+            fetch=lambda: _rack_rerun_snapshot(client, PIPELINE_BRANCH, rack_ids, device_ids, prior_task_ids),
+            ready=_rack_rerun_state_ready,
+            timeout=GENERATOR_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe="stable rack, device, interface, hostvar, and structured-config baseline",
+        )
 
         snapshots = []
         for pass_number in (1, 2):
-            prior_tasks = await wait_until(
-                fetch=lambda: _rack_tasks_for_targets(client, PIPELINE_BRANCH, task_target_ids),
-                ready=_rack_tasks_idle,
+            prior_tasks = await wait_until_stable(
+                fetch=lambda: _branch_task_snapshot(client, PIPELINE_BRANCH),
+                ready=_branch_tasks_idle,
                 timeout=GENERATOR_TIMEOUT,
                 interval=POLL_INTERVAL,
-                describe=f"rack cascade tasks before rerun pass {pass_number}",
+                describe=f"all {PIPELINE_BRANCH} tasks before rack rerun pass {pass_number}",
             )
-            prior_task_ids = {task.id for task in prior_tasks}
+            prior_task_ids = {task["id"] for task in prior_tasks["tasks"]}
             await _run_generator_for_nodes(client, PIPELINE_BRANCH, GENERATOR_RACK, rack_ids)
             snapshot = await wait_until_stable(
                 fetch=lambda task_ids=prior_task_ids: _rack_rerun_snapshot(
@@ -594,10 +630,11 @@ class TestE2EPipeline(TestInfrahubDockerClient):
                 flush=True,
             )
 
-        if snapshots[1] != snapshots[0]:
+        if baseline["state"] != snapshots[0] or snapshots[1] != snapshots[0]:
             pytest.fail(
-                "rack rerun changed generated state after two stable observations:\n"
-                + _rack_snapshot_diff(snapshots[0], snapshots[1])
+                "rack reruns changed generated state from the stable baseline:\n"
+                f"baseline -> pass 1:\n{_rack_snapshot_diff(baseline['state'], snapshots[0])}\n"
+                f"pass 1 -> pass 2:\n{_rack_snapshot_diff(snapshots[0], snapshots[1])}"
             )
 
     # --- Component 11b: DCI link hostvars ----------------------------------
@@ -605,27 +642,18 @@ class TestE2EPipeline(TestInfrahubDockerClient):
     async def test_dci_link_generates_l3_edge_hostvars(self, client: InfrahubClient) -> None:
         """The selected Multi-Domain Border Leafs render and retain a pooled DCI link."""
         setup = await _create_dci_link_scenario(client)
-        settled_tasks = await wait_until_stable(
-            fetch=lambda: _dci_branch_task_snapshot(client, DCI_BRANCH),
-            ready=_dci_branch_tasks_ready,
-            timeout=GENERATOR_TIMEOUT,
-            interval=POLL_INTERVAL,
-            describe=f"DCI branch tasks before hostvar run for {DCI_LINK_NAME}",
-        )
-        prior_task_ids = {task["id"] for task in settled_tasks["tasks"]}
-        await _run_generator_for_nodes(client, DCI_BRANCH, GENERATOR_AVD_HOSTVAR, setup["device_ids"])
-        first_run_tasks = await wait_until_stable(
-            fetch=lambda: _dci_branch_task_snapshot(client, DCI_BRANCH),
-            ready=lambda snapshot: _dci_branch_tasks_ready_since(snapshot, prior_task_ids, setup["device_ids"]),
-            timeout=GENERATOR_TIMEOUT,
-            interval=POLL_INTERVAL,
-            describe=f"DCI hostvar generator tasks for {DCI_LINK_NAME}",
+        await _run_generator_for_nodes_sequentially(
+            client,
+            PIPELINE_BRANCH,
+            GENERATOR_AVD_HOSTVAR,
+            setup["device_ids"],
+            describe=f"DCI hostvar generator for {DCI_LINK_NAME}",
         )
 
         report = await wait_until_stable(
             fetch=lambda: _dci_hostvars_report(
                 client,
-                DCI_BRANCH,
+                PIPELINE_BRANCH,
                 setup["fabric_device_names"],
                 setup["endpoints"],
             ),
@@ -663,19 +691,17 @@ class TestE2EPipeline(TestInfrahubDockerClient):
                 )
 
         first_allocation = list(link["ip"])
-        prior_task_ids = {task["id"] for task in first_run_tasks["tasks"]}
-        await _run_generator_for_nodes(client, DCI_BRANCH, GENERATOR_AVD_HOSTVAR, setup["device_ids"])
-        await wait_until_stable(
-            fetch=lambda: _dci_branch_task_snapshot(client, DCI_BRANCH),
-            ready=lambda snapshot: _dci_branch_tasks_ready_since(snapshot, prior_task_ids, setup["device_ids"]),
-            timeout=GENERATOR_TIMEOUT,
-            interval=POLL_INTERVAL,
-            describe=f"DCI hostvar rerun tasks for {DCI_LINK_NAME}",
+        await _run_generator_for_nodes_sequentially(
+            client,
+            PIPELINE_BRANCH,
+            GENERATOR_AVD_HOSTVAR,
+            setup["device_ids"],
+            describe=f"DCI hostvar rerun for {DCI_LINK_NAME}",
         )
         rerun = await wait_until_stable(
             fetch=lambda: _dci_hostvars_report(
                 client,
-                DCI_BRANCH,
+                PIPELINE_BRANCH,
                 setup["fabric_device_names"],
                 setup["endpoints"],
             ),
@@ -686,14 +712,11 @@ class TestE2EPipeline(TestInfrahubDockerClient):
         )
         assert rerun["unique_matching_links"][0]["ip"] == first_allocation
 
-        final_dci_state = await _dci_fabric_state(client, DCI_BRANCH)
-        pipeline_dci_state = await _dci_fabric_state(client, PIPELINE_BRANCH)
-        _assert_dci_fabric_state(final_dci_state, branch=DCI_BRANCH)
-        _assert_dci_fabric_state(pipeline_dci_state, branch=PIPELINE_BRANCH)
-        assert final_dci_state["fabric_id"] == setup["pipeline_fabric_state"]["fabric_id"]
-        assert final_dci_state["dci_pool"] == pipeline_dci_state["dci_pool"]
-        assert final_dci_state["fabric_ip_pools"] == pipeline_dci_state["fabric_ip_pools"]
-        assert final_dci_state["seed_links"] == pipeline_dci_state["seed_links"]
+        final_dci_state = await _dci_fabric_state(client, PIPELINE_BRANCH)
+        _assert_dci_fabric_state(final_dci_state, branch=PIPELINE_BRANCH)
+        assert final_dci_state == setup["pipeline_fabric_state"], (
+            f"DCI pool references or seeded links changed on {PIPELINE_BRANCH}: {final_dci_state}"
+        )
         print(f"dci hostvars report: {report}", flush=True)
 
     # --- Component 12: artifacts generated ---------------------------------
@@ -1168,6 +1191,7 @@ async def _server_cabling_prerequisites(client: InfrahubClient, branch: str) -> 
       DcimDevice(role__value: "leaf") {
         edges {
           node {
+            id
             name { value }
             rack { node { name { value } } }
             interfaces(role__value: "server") {
@@ -1185,7 +1209,12 @@ async def _server_cabling_prerequisites(client: InfrahubClient, branch: str) -> 
       }
     }
     """
-    resp = await client.execute_graphql(query=query, variables={"rack": SERVER_CABLING_RACK}, branch_name=branch)
+    resp = await client.execute_graphql(
+        query=query,
+        variables={"rack": SERVER_CABLING_RACK},
+        branch_name=branch,
+        timeout=READ_TIMEOUT,
+    )
     rack_edges = resp["LocationRack"]["edges"]
     rack_complete = bool(rack_edges and rack_edges[0]["node"]["generation_complete"]["value"])
     leaves = [
@@ -1203,18 +1232,23 @@ async def _server_cabling_prerequisites(client: InfrahubClient, branch: str) -> 
         )
         for leaf in leaves
     }
+    selected_leaves = sorted(
+        (leaf for leaf in leaves if leaf["name"]["value"] in SERVER_CABLING_LEAF_NAMES),
+        key=lambda item: item["name"]["value"],
+    )
     return {
         "rack_complete": rack_complete,
         "leaf_count": len(leaves),
-        "leaf1_server_ports": ports_by_leaf.get("leaf-pod-b2-1-1", 0),
-        "leaf2_server_ports": ports_by_leaf.get("leaf-pod-b2-1-2", 0),
+        "leaf_ids": [leaf["id"] for leaf in selected_leaves],
+        "leaf1_server_ports": ports_by_leaf.get(SERVER_CABLING_LEAF_NAMES[0], 0),
+        "leaf2_server_ports": ports_by_leaf.get(SERVER_CABLING_LEAF_NAMES[1], 0),
     }
 
 
-async def _server_cabling_report(client: InfrahubClient, branch: str, server_name: str) -> dict:
+async def _server_cabling_report(client: InfrahubClient, branch: str, server_name: str, leaf_ids: list[str]) -> dict:
     """Summarize server-cabling links, server Bond1, and switch-side Port-Channels."""
     query = """
-    query ServerCablingReport($server: String!) {
+    query ServerCablingReport($server: String!, $leaf_ids: [ID]!) {
       ComputePhysicalServer(name__value: $server) {
         edges {
           node {
@@ -1224,7 +1258,16 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
                   __typename
                   ... on InterfacePhysical {
                     name { value }
-                    connector { node { name { value } } }
+                    connector {
+                      node {
+                        __typename
+                        ... on NetworkLink {
+                          name { value }
+                          medium { value }
+                          role { value }
+                        }
+                      }
+                    }
                     lag { node { name { value } } }
                   }
                   ... on InterfaceLag {
@@ -1243,16 +1286,7 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
           }
         }
       }
-      NetworkLink {
-        edges {
-          node {
-            name { value }
-            medium { value }
-            role { value }
-          }
-        }
-      }
-      InterfaceLag {
+      InterfaceLag(device__ids: $leaf_ids, name__value: "Port-Channel1117") {
         edges {
           node {
             name { value }
@@ -1271,7 +1305,11 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
       }
     }
     """
-    resp = await client.execute_graphql(query=query, variables={"server": server_name}, branch_name=branch)
+    resp = await client.execute_graphql(
+        query=query,
+        variables={"server": server_name, "leaf_ids": leaf_ids},
+        branch_name=branch,
+    )
 
     server_edges = resp["ComputePhysicalServer"]["edges"]
     if not server_edges:
@@ -1297,9 +1335,17 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
         elif node["__typename"] == "InterfaceLag" and node["name"]["value"] == "Bond1":
             server_bonds.append(node)
 
-    server_links = [
-        edge["node"] for edge in resp["NetworkLink"]["edges"] if server_name in edge["node"]["name"]["value"]
-    ]
+    server_links = []
+    server_physical_lags = {}
+    server_connected_count = 0
+    for iface in physical_interfaces:
+        lag_node = (iface.get("lag") or {}).get("node") or {}
+        connector_node = (iface.get("connector") or {}).get("node") or {}
+        server_physical_lags[iface["name"]["value"]] = (lag_node.get("name") or {}).get("value")
+        if connector_node:
+            server_connected_count += 1
+            if connector_node.get("__typename") == "NetworkLink":
+                server_links.append(connector_node)
     server_link_metadata = sorted(
         (
             {
@@ -1311,14 +1357,6 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
         ),
         key=itemgetter("name"),
     )
-    server_physical_lags = {}
-    server_connected_count = 0
-    for iface in physical_interfaces:
-        lag_node = (iface.get("lag") or {}).get("node") or {}
-        connector_node = (iface.get("connector") or {}).get("node") or {}
-        server_physical_lags[iface["name"]["value"]] = (lag_node.get("name") or {}).get("value")
-        if connector_node:
-            server_connected_count += 1
     server_bond_members = sorted(
         member_edge["node"]["name"]["value"] for bond in server_bonds for member_edge in bond["lag_members"]["edges"]
     )
@@ -1587,15 +1625,13 @@ async def _rack_rerun_snapshot(
         timeout=READ_TIMEOUT,
     )
     interface_edges, interface_count = await _rack_interface_edges(client, branch, device_ids)
-    tasks = await _rack_tasks_for_targets(client, branch, target_ids)
+    branch_tasks = await _branch_task_snapshot(client, branch, known_task_ids=prior_task_ids)
     task_failures = [
-        diagnostic
-        for task in tasks
-        if task.id not in prior_task_ids and (diagnostic := task_failure_diagnostic(task)) is not None
+        failure["diagnostic"] for failure in branch_tasks["task_failures"] if failure["id"] not in prior_task_ids
     ]
     active_task_states = {"PENDING", "RUNNING", "SCHEDULED", "PAUSED", "CANCELLING", "IN_PROGRESS", "QUEUED"}
-    active_tasks = [_rack_task_state(task) for task in tasks if _task_state(task) in active_task_states]
-    new_tasks = [_rack_task_state(task) for task in tasks if task.id not in prior_task_ids]
+    active_tasks = [task for task in branch_tasks["tasks"] if task["state"] in active_task_states]
+    new_tasks = [task for task in branch_tasks["tasks"] if task["id"] not in prior_task_ids]
 
     generator_instances = _normalize_generator_instances(resp["CoreGeneratorInstance"]["edges"])
     target_id_set = set(target_ids)
@@ -1707,20 +1743,62 @@ async def _rack_device_ids(client: InfrahubClient, branch: str, rack_ids: list[s
     return sorted({device.id for device in devices})
 
 
-async def _rack_tasks_for_targets(client: InfrahubClient, branch: str, target_ids: list[str]) -> list:
-    """List tasks on one branch that target one of the selected racks or devices."""
+async def _branch_task_snapshot(
+    client: InfrahubClient,
+    branch: str,
+    *,
+    known_task_ids: set[str] | None = None,
+) -> dict:
+    """Read branch tasks and load logs only for failures newer than the baseline."""
     tasks = await client.task.filter(
-        filter=TaskFilter(branch=branch, related_node__ids=target_ids),
+        filter=TaskFilter(branch=branch),
         timeout=READ_TIMEOUT,
         include_related_nodes=True,
     )
     detailed_tasks = []
     for task in tasks:
         detailed_task = task
-        if _task_state(task) in {"FAILED", "CRASHED", "CANCELLED"}:
+        if (
+            known_task_ids is not None
+            and task.id not in known_task_ids
+            and _task_state(task) in {"FAILED", "CRASHED", "CANCELLED"}
+        ):
             detailed_task = await client.task.get(id=task.id, include_logs=True, include_related_nodes=True)
         detailed_tasks.append(detailed_task)
-    return sorted(detailed_tasks, key=lambda task: (task.created_at, task.id))
+    task_failures = [
+        {"id": task.id, "diagnostic": diagnostic}
+        for task in detailed_tasks
+        if (diagnostic := task_failure_diagnostic(task)) is not None
+    ]
+    task_states = sorted((_rack_task_state(task) for task in detailed_tasks), key=itemgetter("id"))
+    return {"tasks": task_states, "task_failures": task_failures}
+
+
+def _branch_tasks_idle(snapshot: dict) -> bool:
+    """Wait until the branch has no active tasks."""
+    active_states = {"PENDING", "RUNNING", "SCHEDULED", "PAUSED", "CANCELLING", "IN_PROGRESS", "QUEUED"}
+    return not any(task["state"] in active_states for task in snapshot["tasks"])
+
+
+def _branch_tasks_ready_since(
+    snapshot: dict,
+    prior_task_ids: set[str],
+    target_ids: list[str] | None = None,
+) -> bool:
+    """Require new completed tasks, no active branch work, and optional device targets."""
+    failures = [failure["diagnostic"] for failure in snapshot["task_failures"] if failure["id"] not in prior_task_ids]
+    if failures:
+        raise AssertionError("new branch tasks failed:\n" + "\n".join(failures))
+
+    new_tasks = [task for task in snapshot["tasks"] if task["id"] not in prior_task_ids]
+    if not new_tasks or any(task["state"] != "COMPLETED" for task in new_tasks) or not _branch_tasks_idle(snapshot):
+        return False
+    if target_ids is None:
+        return True
+
+    observed_targets = {target for task in new_tasks for target in task["targets"]}
+    expected_targets = {f"DcimDevice:{target_id}" for target_id in target_ids}
+    return expected_targets <= observed_targets
 
 
 async def _rack_interface_edges(client: InfrahubClient, branch: str, device_ids: list[str]) -> tuple[list[dict], int]:
@@ -1889,14 +1967,8 @@ def _rack_task_state(task: Any) -> dict[str, Any]:
     }
 
 
-def _rack_tasks_idle(tasks: list) -> bool:
-    """Wait until no task on the targeted branch/rack cascade remains active."""
-    active_states = {"PENDING", "RUNNING", "SCHEDULED", "PAUSED", "CANCELLING", "IN_PROGRESS", "QUEUED"}
-    return not any(_task_state(task) in active_states for task in tasks)
-
-
-def _rack_rerun_ready(snapshot: dict) -> bool:
-    """Require completed new tasks and complete generated state, failing on task errors."""
+def _rack_rerun_state_ready(snapshot: dict) -> bool:
+    """Require complete rack state with no active tasks or generator failures."""
     if snapshot.get("task_failures"):
         raise AssertionError("rack rerun tasks failed:\n" + "\n".join(snapshot["task_failures"]))
     if snapshot.get("generator_errors"):
@@ -1906,10 +1978,6 @@ def _rack_rerun_ready(snapshot: dict) -> bool:
             for instance in snapshot["generator_errors"]
         ]
         raise AssertionError("rack generator instances failed:\n" + "\n".join(failures))
-
-    new_tasks = snapshot.get("new_tasks", [])
-    if not new_tasks or any(task["state"] != "COMPLETED" for task in new_tasks):
-        return False
     if snapshot.get("active_tasks") or snapshot.get("active_generator_instances"):
         return False
 
@@ -1932,6 +2000,14 @@ def _rack_rerun_ready(snapshot: dict) -> bool:
         return False
     files = list(snapshot["hostvar_files"].values()) + list(snapshot["structured_config_files"].values())
     return all(file and file["checksum"] and file["storage_id"] and file["content"] is not None for file in files)
+
+
+def _rack_rerun_ready(snapshot: dict) -> bool:
+    """Require completed new tasks and complete generated state, failing on task errors."""
+    if not _rack_rerun_state_ready(snapshot):
+        return False
+    new_tasks = snapshot.get("new_tasks", [])
+    return bool(new_tasks) and all(task["state"] == "COMPLETED" for task in new_tasks)
 
 
 async def _rack_file_state(client: InfrahubClient, file_node: dict) -> dict | None:
@@ -2236,35 +2312,33 @@ def _snapshot_list_items(values: list[Any]) -> dict[tuple[str, ...], Any] | None
 
 
 async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
-    """Create one test DCI link on a dedicated branch with generated fabric state."""
+    """Create the test link on e2e-pipeline, already converged in the disposable stack.
+
+    The pinned BranchCreate mutation cannot select a non-default source branch.
+    Reuse this isolated test branch instead of rebuilding from default.
+    """
     pipeline_fabric_state = await _dci_fabric_state(client, PIPELINE_BRANCH)
     _assert_dci_fabric_state(pipeline_fabric_state, branch=PIPELINE_BRANCH)
-    pipeline_branch = await client.branch.get(PIPELINE_BRANCH)
-    await _create_dci_branch(client, expected_origin=pipeline_branch.origin_branch)
-    branch_fabric_state = await _dci_fabric_state(client, DCI_BRANCH)
-    _assert_dci_fabric_state(branch_fabric_state, branch=DCI_BRANCH)
-    assert branch_fabric_state["fabric_id"] == pipeline_fabric_state["fabric_id"]
-    assert branch_fabric_state["dci_pool"] == pipeline_fabric_state["dci_pool"]
-    assert branch_fabric_state["fabric_ip_pools"] == pipeline_fabric_state["fabric_ip_pools"]
-    assert branch_fabric_state["seed_links"] == pipeline_fabric_state["seed_links"]
-
-    # InfraHub 1.11.5 only allows a new branch from the default branch. Seeded
-    # topology is present there, so regenerate this fabric on the isolated DCI
-    # branch before creating the test link.
-    await _run_generator_for_nodes(client, DCI_BRANCH, GENERATOR_FABRIC, [branch_fabric_state["fabric_id"]])
-    await wait_until_stable(
-        fetch=lambda: _dci_branch_task_snapshot(client, DCI_BRANCH),
-        ready=_dci_branch_tasks_ready,
+    prior_tasks = await wait_until_stable(
+        fetch=lambda: _branch_task_snapshot(client, PIPELINE_BRANCH),
+        ready=_branch_tasks_idle,
         timeout=GENERATOR_TIMEOUT,
         interval=POLL_INTERVAL,
-        describe=f"generator tasks on {DCI_BRANCH}",
+        describe=f"{PIPELINE_BRANCH} tasks before DCI scenario",
     )
-    seed_hostvars = await wait_until(
-        fetch=lambda: _dci_hostvars_report(client, DCI_BRANCH, list(DCI_FABRIC_DEVICE_NAMES)),
-        ready=itemgetter("ready"),
+
+    def seeded_hostvars_ready(report: dict) -> bool:
+        return report["ready"] and all(
+            sum(dci_link_matches_endpoints(link, list(endpoints)) for link in report["links"]) == 1
+            for endpoints in DCI_SEED_LINK_ENDPOINTS.values()
+        )
+
+    seed_hostvars = await wait_until_stable(
+        fetch=lambda: _dci_hostvars_report(client, PIPELINE_BRANCH, list(DCI_FABRIC_DEVICE_NAMES)),
+        ready=seeded_hostvars_ready,
         timeout=GENERATOR_TIMEOUT,
         interval=POLL_INTERVAL,
-        describe=f"seed DCI hostvars on {DCI_BRANCH}",
+        describe=f"stable seed DCI hostvars on {PIPELINE_BRANCH}",
     )
 
     query = """
@@ -2294,7 +2368,7 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
     response = await client.execute_graphql(
         query=query,
         variables={"device_names": list(DCI_DEVICE_NAMES)},
-        branch_name=DCI_BRANCH,
+        branch_name=PIPELINE_BRANCH,
         timeout=READ_TIMEOUT,
     )
     devices = []
@@ -2304,7 +2378,7 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
         asn_node = (node.get("asn") or {}).get("node") or {}
         asn = (asn_node.get("asn") or {}).get("value")
         assert node["role"]["value"] == "border_leaf", f"{node['name']['value']} lost its border_leaf role"
-        assert fabric.get("id") == branch_fabric_state["fabric_id"], (
+        assert fabric.get("id") == pipeline_fabric_state["fabric_id"], (
             f"{node['name']['value']} does not belong to selected fabric {DCI_FABRIC_NAME}"
         )
         assert fabric.get("name", {}).get("value") == DCI_FABRIC_NAME, (
@@ -2342,15 +2416,15 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
     )
     assert all(IPv4Network(allocation).subnet_of(IPv4Network(DCI_POOL_RESOURCE)) for allocation in seed_allocations)
 
-    baseline_report = await asyncio.wait_for(
-        _dci_hostvars_report(client, DCI_BRANCH, list(DCI_FABRIC_DEVICE_NAMES)),
-        timeout=READ_TIMEOUT,
-    )
+    baseline_report = seed_hostvars
     assert baseline_report["ready"], f"selected DCI branch hostvars are incomplete: {baseline_report}"
+
+    existing_links = await client.filters(kind="NetworkLink", name__value=DCI_LINK_NAME, branch=PIPELINE_BRANCH)
+    assert not existing_links, f"test DCI link {DCI_LINK_NAME} already exists on {PIPELINE_BRANCH}"
 
     dci_link = await client.create(
         kind="NetworkLink",
-        branch=DCI_BRANCH,
+        branch=PIPELINE_BRANCH,
         name=DCI_LINK_NAME,
         medium="smf",
         role="dci",
@@ -2364,12 +2438,12 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
             kind="InterfacePhysical",
             name__value=DCI_INTERFACE_NAME,
             device__ids=[device["device_id"]],
-            branch=DCI_BRANCH,
+            branch=PIPELINE_BRANCH,
         )
         assert not existing, f"{device['device_name']} already has {DCI_INTERFACE_NAME}"
         dci_interface = await client.create(
             kind="InterfacePhysical",
-            branch=DCI_BRANCH,
+            branch=PIPELINE_BRANCH,
             name=DCI_INTERFACE_NAME,
             device={"id": device["device_id"]},
             role="peering",
@@ -2378,12 +2452,26 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
         interface = await client.get(
             kind="InterfacePhysical",
             id=dci_interface.id,
-            branch=DCI_BRANCH,
+            branch=PIPELINE_BRANCH,
             include=["connector"],
         )
         interface.connector = dci_link
         interface.status.value = "active"
         await interface.save(allow_upsert=True)
+
+    prior_task_ids = {task["id"] for task in prior_tasks["tasks"]}
+    setup_tasks = await wait_until_stable(
+        fetch=lambda: _branch_task_snapshot(client, PIPELINE_BRANCH, known_task_ids=prior_task_ids),
+        ready=_branch_tasks_idle,
+        timeout=GENERATOR_TIMEOUT,
+        interval=POLL_INTERVAL,
+        describe=f"{PIPELINE_BRANCH} tasks after creating {DCI_LINK_NAME}",
+    )
+    setup_failures = [
+        failure["diagnostic"] for failure in setup_tasks["task_failures"] if failure["id"] not in prior_task_ids
+    ]
+    if setup_failures:
+        raise AssertionError("DCI link setup tasks failed:\n" + "\n".join(setup_failures))
 
     return {
         "device_ids": [device["device_id"] for device in devices],
@@ -2395,55 +2483,7 @@ async def _create_dci_link_scenario(client: InfrahubClient) -> dict:
         "seed_allocations": seed_allocations,
         "baseline_hostvars": baseline_report["hostvars"],
         "pipeline_fabric_state": pipeline_fabric_state,
-        "branch_fabric_state": branch_fabric_state,
     }
-
-
-async def _create_dci_branch(client: InfrahubClient, *, expected_origin: str | None) -> None:
-    """Create a dedicated default-based branch; InfraHub 1.11.5 rejects child branches."""
-    branch = await client.branch.create(branch_name=DCI_BRANCH, sync_with_git=False)
-    assert branch.origin_branch == expected_origin, (
-        f"{DCI_BRANCH} originated from {branch.origin_branch!r}, expected default origin {expected_origin!r}"
-    )
-
-
-async def _dci_branch_task_snapshot(client: InfrahubClient, branch: str) -> dict:
-    """Read all tasks on the dedicated DCI branch, including targeted failure logs."""
-    tasks = await client.task.filter(
-        filter=TaskFilter(branch=branch),
-        timeout=READ_TIMEOUT,
-        include_related_nodes=True,
-    )
-    detailed_tasks = []
-    for task in tasks:
-        detailed_task = task
-        if _task_state(task) in {"FAILED", "CRASHED", "CANCELLED"}:
-            detailed_task = await client.task.get(id=task.id, include_logs=True, include_related_nodes=True)
-        detailed_tasks.append(detailed_task)
-    task_failures = [diagnostic for task in detailed_tasks if (diagnostic := task_failure_diagnostic(task)) is not None]
-    task_states = sorted((_rack_task_state(task) for task in detailed_tasks), key=itemgetter("id"))
-    return {"tasks": task_states, "task_failures": task_failures}
-
-
-def _dci_branch_tasks_ready(snapshot: dict) -> bool:
-    """Wait for the DCI branch cascade to finish and fail immediately on task errors."""
-    if snapshot["task_failures"]:
-        raise AssertionError("DCI branch generator tasks failed:\n" + "\n".join(snapshot["task_failures"]))
-    tasks = snapshot["tasks"]
-    return bool(tasks) and all(task["state"] == "COMPLETED" for task in tasks)
-
-
-def _dci_branch_tasks_ready_since(snapshot: dict, prior_task_ids: set[str], target_ids: list[str]) -> bool:
-    """Require fresh completed generator tasks for every explicitly rerun device."""
-    if snapshot["task_failures"]:
-        raise AssertionError("DCI branch generator tasks failed:\n" + "\n".join(snapshot["task_failures"]))
-    tasks = snapshot["tasks"]
-    new_tasks = [task for task in tasks if task["id"] not in prior_task_ids]
-    if not new_tasks or any(task["state"] != "COMPLETED" for task in tasks):
-        return False
-    observed_targets = {target for task in new_tasks for target in task["targets"]}
-    expected_targets = {f"DcimDevice:{target_id}" for target_id in target_ids}
-    return expected_targets <= observed_targets
 
 
 async def _dci_fabric_state(client: InfrahubClient, branch: str) -> dict:
@@ -2585,6 +2625,38 @@ async def _run_generator_for_nodes(
             return
         result = response["CoreGeneratorDefinitionRun"]
         assert result["ok"], f"failed to launch {generator_name} on {branch} for target {node_id}: {result}"
+
+
+async def _run_generator_for_nodes_sequentially(
+    client: InfrahubClient,
+    branch: str,
+    generator_name: str,
+    node_ids: list[str],
+    *,
+    describe: str,
+) -> None:
+    """Run each device generator only after the prior branch cascade settles."""
+    settled = await wait_until_stable(
+        fetch=lambda: _branch_task_snapshot(client, branch),
+        ready=_branch_tasks_idle,
+        timeout=GENERATOR_TIMEOUT,
+        interval=POLL_INTERVAL,
+        describe=f"{describe}: branch tasks before run",
+    )
+    for node_id in node_ids:
+        prior_task_ids = {task["id"] for task in settled["tasks"]}
+        await _run_generator_for_nodes(client, branch, generator_name, [node_id])
+        settled = await wait_until_stable(
+            fetch=lambda known_ids=prior_task_ids: _branch_task_snapshot(client, branch, known_task_ids=known_ids),
+            ready=lambda snapshot, known_ids=prior_task_ids, target=node_id: _branch_tasks_ready_since(
+                snapshot,
+                known_ids,
+                [target],
+            ),
+            timeout=GENERATOR_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe=f"{describe}: completed task cascade for {node_id}",
+        )
 
 
 async def _dci_hostvars_report(

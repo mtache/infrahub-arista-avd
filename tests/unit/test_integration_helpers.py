@@ -18,7 +18,7 @@ from tests.integration.helpers import (
     wait_until_stable,
 )
 from tests.integration.test_e2e_pipeline import (
-    _dci_branch_tasks_ready_since,
+    _branch_tasks_ready_since,
     _dci_link_identity,
     _fetch_ready_artifact_contents_by_target,
     _rack_snapshot_diff,
@@ -356,14 +356,14 @@ async def test_generator_launch_timeout_is_observed_without_resubmission(capsys:
     assert "observing tasks and outputs before any retry" in capsys.readouterr().out
 
 
-def test_dci_rerun_wait_requires_new_completed_tasks_for_each_target() -> None:
+def test_branch_task_ready_requires_new_completed_tasks_for_each_target() -> None:
     snapshot = {
         "task_failures": [],
         "tasks": [{"id": "prior", "state": "COMPLETED", "targets": ["DcimDevice:device-a"]}],
     }
     target_ids = ["device-a", "device-b"]
 
-    assert not _dci_branch_tasks_ready_since(snapshot, {"prior"}, target_ids)
+    assert not _branch_tasks_ready_since(snapshot, {"prior"}, target_ids)
 
     snapshot["tasks"].extend(
         [
@@ -371,11 +371,11 @@ def test_dci_rerun_wait_requires_new_completed_tasks_for_each_target() -> None:
             {"id": "new-b", "state": "RUNNING", "targets": ["DcimDevice:device-b"]},
         ]
     )
-    assert not _dci_branch_tasks_ready_since(snapshot, {"prior"}, target_ids)
+    assert not _branch_tasks_ready_since(snapshot, {"prior"}, target_ids)
 
     snapshot["tasks"][-1]["state"] = "COMPLETED"
-    assert _dci_branch_tasks_ready_since(snapshot, {"prior"}, target_ids)
+    assert _branch_tasks_ready_since(snapshot, {"prior"}, target_ids)
 
-    snapshot["task_failures"] = ["FAILED task task-failed error=run failed"]
+    snapshot["task_failures"] = [{"id": "new-failed", "diagnostic": "FAILED task task-failed error=run failed"}]
     with pytest.raises(AssertionError, match="FAILED task task-failed"):
-        _dci_branch_tasks_ready_since(snapshot, {"prior"}, target_ids)
+        _branch_tasks_ready_since(snapshot, {"prior"}, target_ids)
