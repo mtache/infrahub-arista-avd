@@ -1521,5 +1521,8 @@ async def test_backfill_mtu_two_passes_do_not_claim_topology_interface() -> None
     await gen._update_mtu(first, 9214, "leaf-1")
     second = _make_interface(mtu=9214)
     await gen._update_mtu(second, 9214, "leaf-1")
-    interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+    assert interface.save.await_count == 2
+    assert all(
+        call.kwargs == {"allow_upsert": True, "update_group_context": False} for call in interface.save.await_args_list
+    )
     assert interface.id == "rack-owned-port"
