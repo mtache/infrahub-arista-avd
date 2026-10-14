@@ -181,6 +181,11 @@ python_transforms:
   - name: avd_anta_catalog
     class_name: AvdAntaCatalogTransform
     file_path: "./transforms/avd_anta_catalog.py"
+    watch:
+      files:
+        - "transforms/avd_anta_catalog_query.py"
+        - "src/solution_arista_avd/avd.py"
+        - "src/solution_arista_avd/protocols.py"
   - name: containerlab_topology
     class_name: ContainerLabTopology
     file_path: "./transforms/containerlab_topology.py"

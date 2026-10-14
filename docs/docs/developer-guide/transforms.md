@@ -155,6 +155,13 @@ the artifact renders successfully and says why it is empty:
 # ANTA disabled for fabric Fabric-L3LS-Multi-Domain
 ```
 
+For an enabled fabric, the transform reads structured-config file metadata in a
+single typed collection, then downloads and validates every sibling device's
+configuration with at most two concurrent downloads. Files are read again on
+each transform execution so later generations and branches retain fresh data.
+A file disappearing after the query fails rendering rather than producing an
+incomplete catalog.
+
 ### ContainerLabTopology
 
 **File**: `transforms/containerlab_topology.py`
