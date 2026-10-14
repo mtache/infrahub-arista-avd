@@ -8,7 +8,9 @@ from unittest.mock import AsyncMock
 import pytest
 import yaml
 
+from solution_arista_avd.protocols import AvdStructuredConfigFile
 from transforms.avd_anta_catalog import AvdAntaCatalogTransform
+from transforms.avd_anta_catalog_query import AvdAntaCatalogQuery
 
 FABRIC_ID = "fabric-1"
 
@@ -92,9 +94,10 @@ def _transform(structured_config: dict | None = None) -> AvdAntaCatalogTransform
     """Build a transform with a mocked client that returns the given structured config."""
     t = AvdAntaCatalogTransform.__new__(AvdAntaCatalogTransform)
     sc_file = AsyncMock()
+    sc_file.id = "scf-dev-target"
     sc_file.download_file = AsyncMock(return_value=json.dumps(structured_config or {"hostname": "leaf1"}))
     client = AsyncMock()
-    client.get = AsyncMock(return_value=sc_file)
+    client.filters = AsyncMock(return_value=[sc_file])
     t._init_client = client  # `client` is a read-only property backed by _init_client
     return t
 
@@ -178,6 +181,66 @@ def test_query_exposes_fabric_settings_for_proposed_change_impact_tracking() -> 
     )[0]
     assert "anta_enabled" in direct_fabric_query
     assert "avd_catalogs_filters" in direct_fabric_query
+
+
+async def test_whole_fabric_configs_use_one_metadata_read_and_preserve_file_identity() -> None:
+    transform = _transform()
+    data = _data(anta_enabled=True)
+    devices = [_device(f"leaf-{index}", f"dev-{index}") for index in range(32)]
+    data["DcimDevice"]["edges"] = [
+        *({"node": device} for device in devices),
+        {"node": _device("other-fabric", "other", fabric_id="unrelated")},
+        {"node": _device("no-config", "missing", with_sc=False)},
+    ]
+    files = [
+        SimpleNamespace(
+            id=f"scf-dev-{index}",
+            download_file=AsyncMock(return_value=json.dumps({"hostname": f"leaf-{index}"})),
+        )
+        for index in range(32)
+    ]
+    transform.client.filters.return_value = list(reversed(files))
+
+    configs = await transform._fabric_structured_configs(AvdAntaCatalogQuery.model_validate(data), FABRIC_ID)
+
+    assert configs == {f"leaf-{index}": {"hostname": f"leaf-{index}"} for index in range(32)}
+    transform.client.filters.assert_awaited_once_with(
+        AvdStructuredConfigFile, ids=sorted(file.id for file in files), prefetch_relationships=False
+    )
+    transform.client.get.assert_not_awaited()
+    for file in files:
+        file.download_file.assert_awaited_once()
+
+
+async def test_catalog_reads_fresh_metadata_and_contents_on_each_execution() -> None:
+    transform = _transform()
+    files = [
+        SimpleNamespace(
+            id="scf-dev-target",
+            download_file=AsyncMock(return_value=json.dumps({"hostname": "leaf1", "domain_name": domain})),
+        )
+        for domain in ("before.example", "after.example")
+    ]
+    transform.client.filters.side_effect = [[file] for file in files]
+    data = AvdAntaCatalogQuery.model_validate(_data(anta_enabled=True))
+
+    before = await transform._fabric_structured_configs(data, FABRIC_ID)
+    after = await transform._fabric_structured_configs(data, FABRIC_ID)
+
+    assert before["leaf1"]["domain_name"] == "before.example"
+    assert after["leaf1"]["domain_name"] == "after.example"
+    assert transform.client.filters.await_count == 2
+    for file in files:
+        file.download_file.assert_awaited_once()
+
+
+async def test_missing_required_catalog_file_fails_instead_of_omitting_a_sibling() -> None:
+    transform = _transform()
+    transform.client.filters.return_value = []
+    data = AvdAntaCatalogQuery.model_validate(_data(anta_enabled=True))
+
+    with pytest.raises(KeyError, match="scf-dev-target"):
+        await transform._fabric_structured_configs(data, FABRIC_ID)
 
 
 if __name__ == "__main__":
