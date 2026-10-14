@@ -26,6 +26,7 @@ Select locally with ``-m e2e``; exclude with ``-m "not e2e"``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import shlex
@@ -138,7 +139,7 @@ class TestE2EPipeline(IntegrationStack):
 
     @pytest_asyncio.fixture(scope="class", loop_scope="class")
     async def cascade_started(self, branch_ready: bool, client: InfrahubClient):
-        before = {task.id for task in await client.task.filter(TaskFilter(branch=PIPELINE_BRANCH))}
+        before = {task.id for task in await _pipeline_tasks(client, PIPELINE_BRANCH)}
         await self._prepare_fabric(client)
         return {"previous_tasks": before}
 
@@ -303,19 +304,26 @@ class TestE2EPipeline(IntegrationStack):
         """
         gen_def = await client.get(kind="CoreGeneratorDefinition", name__value=GENERATOR_FABRIC, branch=PIPELINE_BRANCH)
         fabrics = await client.all(kind="NetworkFabric", branch=PIPELINE_BRANCH)
-        fabric_ids = [fabric.id for fabric in fabrics]
+        fabric_ids = [fabric.id for fabric in sorted(fabrics, key=lambda fabric: fabric.name.value)]
         assert fabric_ids, "no fabrics found on the pipeline branch"
-        await client.execute_graphql(
-            query="""
-            mutation RunGenerator($id: String!, $nodes: [String!]!) {
-                CoreGeneratorDefinitionRun(data: { id: $id, nodes: $nodes }) {
-                    ok
+        # Let each fabric's trigger-driven cascade settle before the next
+        # kickoff. All fabrics and downstream generators are still exercised;
+        # overlapping their backfills overloads the CI-sized API server.
+        for fabric_id in fabric_ids:
+            before = {task.id for task in await _pipeline_tasks(client, PIPELINE_BRANCH)}
+            await client.execute_graphql(
+                query="""
+                mutation RunGenerator($id: String!, $nodes: [String!]!) {
+                    CoreGeneratorDefinitionRun(data: { id: $id, nodes: $nodes }) {
+                        ok
+                    }
                 }
-            }
-            """,
-            variables={"id": gen_def.id, "nodes": fabric_ids},
-            branch_name=PIPELINE_BRANCH,
-        )
+                """,
+                variables={"id": gen_def.id, "nodes": [fabric_id]},
+                branch_name=PIPELINE_BRANCH,
+            )
+            await _wait_for_tasks(client, PIPELINE_BRANCH, before)
+            print(f"Fabric cascade settled: {fabric_id}", flush=True)
 
         expected = await expected_super_spine_count(client, PIPELINE_BRANCH)
         super_spines = await wait_until(
@@ -685,7 +693,7 @@ class TestE2EPipeline(IntegrationStack):
         """Every AVD artifact definition yields at least one Ready artifact on the branch (FR-011/FR-013)."""
         definitions = await client.all(kind="CoreArtifactDefinition", branch=PIPELINE_BRANCH)
         assert definitions, "no artifact definitions registered (repository sync incomplete?)"
-        previous_tasks = {task.id for task in await client.task.filter(TaskFilter(branch=PIPELINE_BRANCH))}
+        previous_tasks = {task.id for task in await _pipeline_tasks(client, PIPELINE_BRANCH)}
         await _trigger_all_artifacts(client, PIPELINE_BRANCH, definitions)
 
         started = time.monotonic()
@@ -791,7 +799,7 @@ class TestE2EPipeline(IntegrationStack):
         initial_storage = await _fetch_ready_artifact_storage_by_target(
             client, scenario_branch, ARTIFACT_AVD_ANTA_CATALOG
         )
-        previous_tasks = {task.id for task in await client.task.filter(TaskFilter(branch=scenario_branch))}
+        previous_tasks = {task.id for task in await _pipeline_tasks(client, scenario_branch)}
         fabric.anta_enabled.value = False
         await fabric.save()
         response = await client._post(
@@ -806,7 +814,7 @@ class TestE2EPipeline(IntegrationStack):
         disabled = {name: await storage_content(client, identifier) for name, identifier in disabled_storage.items()}
         assert all(ANTA_DISABLED_MARKER in disabled.get(name, "") for name in device_ids_by_name)
 
-        previous_tasks = {task.id for task in await client.task.filter(TaskFilter(branch=scenario_branch))}
+        previous_tasks = {task.id for task in await _pipeline_tasks(client, scenario_branch)}
         fabric.anta_enabled.value = True
         await fabric.save()
         proposed_change = await client.create(
@@ -1767,7 +1775,7 @@ async def _ensure_dci_pool(client: InfrahubClient, branch: str, fabric_id: str) 
 async def _run_generator_for_nodes(
     client: InfrahubClient, branch: str, generator_name: str, node_ids: list[str]
 ) -> None:
-    before = {task.id for task in await client.task.filter(TaskFilter(branch=branch))}
+    before = {task.id for task in await _pipeline_tasks(client, branch)}
     gen_def = await client.get(kind="CoreGeneratorDefinition", name__value=generator_name, branch=branch)
     if node_ids:
         await client.execute_graphql(
@@ -1805,8 +1813,37 @@ async def _wait_for_tasks(client: InfrahubClient, branch: str, before: set[str])
     print(f"Completed tasks on {branch}: {[task.id for task in tasks]}", flush=True)
 
 
+async def _pipeline_tasks(client: InfrahubClient, branch: str) -> list:
+    """Include nested generator runs whose Prefect metadata omits the branch.
+
+    This client belongs to one isolated stack. Checkpoint both collections before
+    each mutation so earlier generator runs cannot be mistaken for its cascade.
+    """
+    branch_tasks, generator_tasks = await asyncio.gather(
+        _task_pages(client, TaskFilter(branch=branch)),
+        _task_pages(client, TaskFilter(workflow=["generator-run"])),
+    )
+    tasks = {task.id: task for task in branch_tasks}
+    tasks.update({task.id: task for task in generator_tasks if task.branch is None})
+    return list(tasks.values())
+
+
+async def _task_pages(client: InfrahubClient, filters: TaskFilter) -> list:
+    """Read metadata pages without the SDK's repeated task-count queries."""
+    tasks = []
+    offset = 0
+    while True:
+        page = await read_with_retry(
+            lambda offset=offset: client.task.filter(filters, offset=offset, limit=200, timeout=15)
+        )
+        tasks.extend(page)
+        if len(page) < 200:
+            return tasks
+        offset += 200
+
+
 async def _execution_tasks(client: InfrahubClient, branch: str, before: set[str]) -> list:
-    tasks = [task for task in await client.task.filter(TaskFilter(branch=branch)) if task.id not in before]
+    tasks = [task for task in await _pipeline_tasks(client, branch) if task.id not in before]
     failed = [task for task in tasks if task.state in {"FAILED", "CRASHED", "CANCELLED"}]
     if failed:
         details = [await client.task.get(task.id, include_logs=True) for task in failed]

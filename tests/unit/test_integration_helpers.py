@@ -1,6 +1,7 @@
 """Offline regressions for bounded integration reads and storage pressure."""
 
 import asyncio
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 
@@ -73,6 +74,73 @@ async def test_new_task_failures_are_immediate_and_prior_failures_are_ignored() 
     with pytest.raises(AssertionError, match="failure detail"):
         await _execution_tasks(client, "scenario", {"prior"})
     client.task.get.assert_awaited_once_with("current", include_logs=True)
+
+
+@pytest.mark.asyncio
+async def test_nested_generator_without_branch_is_part_of_the_new_execution() -> None:
+    from tests.integration.test_e2e_pipeline import _execution_tasks, _pipeline_tasks
+
+    old = Mock(id="old", branch=None, state="FAILED")
+    root = Mock(id="root", branch="scenario", state="COMPLETED")
+    child = Mock(id="child", branch=None, state="RUNNING")
+    foreign = Mock(id="foreign", branch="other-scenario", state="FAILED")
+    client = Mock()
+    client.task.filter = AsyncMock(side_effect=[[], [old], [root], [old, child, foreign]])
+    before = {task.id for task in await _pipeline_tasks(client, "scenario")}
+    assert await _execution_tasks(client, "scenario", before) == [root, child]
+    child.state = "FAILED"
+    client.task.filter.side_effect = [[root], [old, child, foreign]]
+    client.task.get = AsyncMock(return_value="nested failure detail")
+    with pytest.raises(AssertionError, match="nested failure detail"):
+        await _execution_tasks(client, "scenario", before)
+    client.task.get.assert_awaited_once_with("child", include_logs=True)
+
+
+@pytest.mark.asyncio
+async def test_task_metadata_pages_do_not_truncate_or_request_task_counts() -> None:
+    from infrahub_sdk.task import TaskFilter
+
+    from tests.integration.test_e2e_pipeline import _task_pages
+
+    tasks = [Mock(id=str(index)) for index in range(201)]
+    client = Mock()
+    client.task.filter = AsyncMock(side_effect=[tasks[:200], tasks[200:]])
+    assert await _task_pages(client, TaskFilter(branch="scenario")) == tasks
+    assert [call.kwargs["offset"] for call in client.task.filter.await_args_list] == [0, 200]
+    assert all(
+        call.kwargs["limit"] == 200 and call.kwargs["timeout"] == 15 for call in client.task.filter.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_fabric_kickoffs_preserve_every_target_and_wait_for_each_cascade(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.integration import test_e2e_pipeline as pipeline
+
+    client = Mock()
+    client.get = AsyncMock(return_value=Mock(id="generator"))
+    client.all = AsyncMock(
+        return_value=[
+            SimpleNamespace(id=identifier, name=SimpleNamespace(value=identifier)) for identifier in ["B", "A"]
+        ]
+    )
+    events = []
+
+    async def run(query: str, variables: dict, branch_name: str) -> dict:
+        assert "CoreGeneratorDefinitionRun" in query and branch_name == pipeline.PIPELINE_BRANCH
+        events.append(("run", variables["nodes"]))
+        return {"CoreGeneratorDefinitionRun": {"ok": True}}
+
+    async def settled(client: object, branch: str, before: set[str]) -> None:
+        assert client is not None and branch == pipeline.PIPELINE_BRANCH and before == set()
+        events.append(("settled", None))
+
+    client.execute_graphql = AsyncMock(side_effect=run)
+    monkeypatch.setattr(pipeline, "_pipeline_tasks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(pipeline, "_wait_for_tasks", settled)
+    monkeypatch.setattr(pipeline, "expected_super_spine_count", AsyncMock(return_value=1))
+    monkeypatch.setattr(pipeline, "wait_until", AsyncMock(return_value=[Mock()]))
+    await pipeline.TestE2EPipeline()._prepare_fabric(client)
+    assert events == [("run", ["A"]), ("settled", None), ("run", ["B"]), ("settled", None)]
 
 
 @pytest.mark.asyncio
