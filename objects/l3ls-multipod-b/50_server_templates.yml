@@ -17,7 +17,7 @@ spec:
           - template_name: "MultiPodBComputeServerSingleEthernet1"
             name: "Ethernet1"
             profiles:
-              - profile-multipod-b-server-compute
+              - profile-multipod-b-compute
     - template_name: "multipod-b-compute-server-dual"
       role: "compute"
       status: "provisioning"
@@ -29,4 +29,4 @@ spec:
           - template_name: "MultiPodBComputeServerDualEthernet[1-2]"
             name: "Ethernet[1-2]"
             profiles:
-              - profile-multipod-b-server-compute
+              - profile-multipod-b-compute

@@ -4,7 +4,7 @@ kind: Object
 spec:
   kind: ProfileDcimInterface
   data:
-    - profile_name: "profile-multipod-b-server-compute"
+    - profile_name: "profile-multipod-b-compute"
       role: "server"
       mtu: 9000
       tagged_vlan:

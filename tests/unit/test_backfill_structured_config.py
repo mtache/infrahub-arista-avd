@@ -395,7 +395,7 @@ class TestBackfillIp:
         # Verify interface assignment
         gen.client.get.assert_awaited_once()
         assert mock_interface.ip_address == mock_ip
-        mock_interface.save.assert_awaited_once_with(allow_upsert=True)
+        mock_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     async def test_backfill_skips_invalid_ip(self) -> None:
         """Test that invalid IP format is skipped without error."""
@@ -479,7 +479,7 @@ class TestBackfillIp:
 
         gen.client.create.assert_not_called()
         assert mock_interface.ip_address == existing_ip
-        mock_interface.save.assert_awaited_once_with(allow_upsert=True)
+        mock_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     async def test_backfill_assigns_existing_ip_with_uninitialized_interface_relationship(self) -> None:
         gen = _make_generator()
@@ -496,7 +496,7 @@ class TestBackfillIp:
         gen.client.create.assert_not_called()
         interface_rel.fetch.assert_not_called()
         assert mock_interface.ip_address == existing_ip
-        mock_interface.save.assert_awaited_once_with(allow_upsert=True)
+        mock_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
 
 class TestUpdateMtu:
@@ -512,7 +512,7 @@ class TestUpdateMtu:
 
         gen.client.get.assert_awaited_once()
         assert mock_interface.mtu.value == 9214
-        mock_interface.save.assert_awaited_once_with(allow_upsert=True)
+        mock_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     async def test_upserts_mtu_when_same(self) -> None:
         """Test that MTU is always saved even when current equals target."""
@@ -525,7 +525,7 @@ class TestUpdateMtu:
         await gen._update_mtu(iface, 9214, "leaf-1")
 
         gen.client.get.assert_awaited_once()
-        mock_interface.save.assert_awaited_once_with(allow_upsert=True)
+        mock_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
 
 # --- BGP backfill ---
@@ -1111,8 +1111,8 @@ class TestGenerate:
         gen.client.create.assert_not_called()
         assert loopback0.mtu.value == 9214
         assert loopback1.mtu.value == 9214
-        loopback0.save.assert_awaited_once_with(allow_upsert=True)
-        loopback1.save.assert_awaited_once_with(allow_upsert=True)
+        loopback0.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+        loopback1.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     async def test_upserts_interface_with_existing_ip(self) -> None:
         """Test that interfaces with existing IPs are still upserted."""
@@ -1509,3 +1509,17 @@ class TestConstants:
         assert "ip_routing" in UNMODELED_SECTIONS
         assert "spanning_tree" in UNMODELED_SECTIONS
         assert "ntp" in UNMODELED_SECTIONS
+
+
+async def test_backfill_mtu_two_passes_do_not_claim_topology_interface() -> None:
+    gen = _make_generator()
+    interface = _make_saveable_mock()
+    interface.id = "rack-owned-port"
+    interface.mtu.value = 1500
+    gen.client.get = AsyncMock(return_value=interface)
+    first = _make_interface(mtu=1500)
+    await gen._update_mtu(first, 9214, "leaf-1")
+    second = _make_interface(mtu=9214)
+    await gen._update_mtu(second, 9214, "leaf-1")
+    interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+    assert interface.id == "rack-owned-port"

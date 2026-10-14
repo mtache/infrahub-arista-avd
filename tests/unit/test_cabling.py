@@ -405,3 +405,34 @@ def test_parallel_uplink_suffixes_are_stable_and_naturally_ordered() -> None:
     }
     assert forward == expected
     assert reverse == expected
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("indexes", [(2, 1), (None, None), (2, None)])
+def test_device_interface_sorting_ignores_response_order(reverse: bool, indexes: tuple[int | None, int | None]) -> None:
+    from solution_arista_avd.sorting import (
+        create_reverse_sorted_device_interface_map,
+        create_sorted_device_interface_map,
+    )
+
+    devices = []
+    interfaces = []
+    for name, index in zip(("leaf-10", "leaf-2"), indexes, strict=True):
+        device = MagicMock()
+        device.id = name
+        device.name.value = name
+        device.index.value = index
+        devices.append(device)
+        for port in ("Ethernet10", "Ethernet2"):
+            interface = MagicMock()
+            interface.name.value = port
+            interface.device.peer = device
+            interfaces.append(interface)
+    sort = create_reverse_sorted_device_interface_map if reverse else create_sorted_device_interface_map
+    first = sort(interfaces)
+    second = sort(list(reversed(interfaces)))
+    assert first == second
+    assert [device.name.value for device in first] == ["leaf-2", "leaf-10"]
+    assert [interface.name.value for interface in next(iter(first.values()))] == (
+        ["Ethernet10", "Ethernet2"] if reverse else ["Ethernet2", "Ethernet10"]
+    )
