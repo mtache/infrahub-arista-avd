@@ -678,15 +678,17 @@ def test_failed_container_startup_still_preserves_logs_and_tears_down(tmp_path: 
 
 @pytest.mark.asyncio
 async def test_dci_targets_only_the_explicit_fabric_in_deterministic_order() -> None:
-    from tests.integration.test_e2e_pipeline import _dci_leaf_candidates
+    from tests.integration.test_e2e_pipeline import _dci_border_candidates
 
-    def device(name: str, fabric: str) -> dict:
+    def device(name: str, fabric: str, pod: str = "dc1") -> dict:
         return {
             "node": {
                 "id": name,
                 "name": {"value": name},
                 "asn": {"node": {"asn": {"value": 65101}}},
-                "pod": {"node": {"parent": {"node": {"id": fabric, "name": {"value": fabric}}}}},
+                "pod": {
+                    "node": {"name": {"value": pod}, "parent": {"node": {"id": fabric, "name": {"value": fabric}}}}
+                },
             }
         }
 
@@ -696,26 +698,58 @@ async def test_dci_targets_only_the_explicit_fabric_in_deterministic_order() -> 
             "DcimDevice": {
                 "edges": [
                     device("foreign", "Fabric-L3LS-MultiPod-B"),
-                    device("leaf-2", "Fabric-L3LS-MultiPod-A"),
-                    device("leaf-1", "Fabric-L3LS-MultiPod-A"),
+                    device("border-2", "Fabric-L3LS-Multi-Domain", "dc2"),
+                    device("border-1", "Fabric-L3LS-Multi-Domain"),
+                    device("ordinary-leaf", "Fabric-L3LS-MultiPod-A"),
                 ]
             }
         }
     )
-    candidates = await _dci_leaf_candidates(client, "dci")
-    assert [device["device_name"] for device in candidates] == ["leaf-1", "leaf-2"]
+    candidates = await _dci_border_candidates(client, "dci")
+    assert [device["device_name"] for device in candidates] == ["border-1", "border-2"]
+    assert 'role__value: "border_leaf"' in client.execute_graphql.await_args.kwargs["query"]
 
 
 @pytest.mark.asyncio
-async def test_dci_never_replaces_an_existing_pool() -> None:
-    from tests.integration.test_e2e_pipeline import _ensure_dci_pool
+async def test_dci_reuses_seed_pool_and_connects_distinct_datacenters(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.integration import test_e2e_pipeline as pipeline
 
+    candidates = [
+        {
+            "device_id": f"dc{dc}-{index}",
+            "device_name": f"leaf-infrahub-dc{dc}-1-{index}",
+            "pod_name": f"infrahub-dc{dc}",
+            "device_asn": 65000 + dc * 100 + index,
+            "fabric_id": "fabric",
+        }
+        for dc in (1, 2)
+        for index in (1, 2)
+    ]
+    monkeypatch.setattr(pipeline, "_dci_border_candidates", AsyncMock(return_value=candidates))
     client = Mock()
-    client.get = AsyncMock(return_value=Mock(dci_pool=Mock(id="existing")))
-    client.create = AsyncMock()
-    with pytest.raises(AssertionError, match="existing DCI pool"):
-        await _ensure_dci_pool(client, "dci", "fabric")
-    client.create.assert_not_awaited()
+    fabric = Mock(id="fabric", dci_pool=Mock(id="existing"), save=AsyncMock())
+    pool = SimpleNamespace(
+        name=SimpleNamespace(value=pipeline.DCI_POOL_NAME),
+        default_prefix_length=SimpleNamespace(value=31),
+        resources=SimpleNamespace(
+            peers=[SimpleNamespace(peer=SimpleNamespace(prefix=SimpleNamespace(value=pipeline.DCI_POOL_PREFIX)))]
+        ),
+    )
+    interfaces = [Mock(id=f"interface-{index}", status=Mock(), save=AsyncMock()) for index in range(2)]
+    link = Mock(id="new-link", save=AsyncMock())
+    client.get = AsyncMock(side_effect=[fabric, pool, *interfaces])
+    client.create = AsyncMock(side_effect=[link, *interfaces])
+    setup = await pipeline._create_dci_link_scenario(client, "dci")
+    assert setup["pool_id"] == "existing"
+    assert len(setup["expected_links"]) == 5
+    assert len(setup["device_ids"]) == 4
+    assert [call.kwargs["device"]["id"] for call in client.create.await_args_list[1:]] == ["dc1-1", "dc2-1"]
+    assert [call.kwargs["kind"] for call in client.create.await_args_list] == [
+        "NetworkLink",
+        "InterfacePhysical",
+        "InterfacePhysical",
+    ]
+    fabric.save.assert_not_awaited()
 
 
 @pytest.mark.asyncio

@@ -31,6 +31,7 @@ import json
 import os
 import shlex
 import time
+from ipaddress import ip_interface, ip_network
 from operator import itemgetter
 from typing import TYPE_CHECKING
 
@@ -83,8 +84,9 @@ GENERATOR_AVD_STRUCTURED_CONFIG = "generate-avd-device-structured-config"
 SERVER_CABLING_RACK = "Rack-B2-1"
 SERVER_CABLING_SERVER = "e2e-server-b2-1"
 SERVER_CABLING_TEMPLATE = "multipod-b-compute-server-dual"
-DCI_POOL_PREFIX = "10.253.253.0/24"
-DCI_POOL_NAME = "E2E-DCI-Pool"
+DCI_FABRIC = "Fabric-L3LS-Multi-Domain"
+DCI_POOL_PREFIX = "172.16.0.0/28"
+DCI_POOL_NAME = f"{DCI_FABRIC}-DCI-Pool"
 DCI_LINK_NAME = "e2e-dci-link"
 DCI_INTERFACE_NAME = "Ethernet999"
 FILTERED_ANTA_FABRIC = "Fabric-L3LS-Multi-Domain"
@@ -644,7 +646,11 @@ class TestE2EPipeline(IntegrationStack):
         assert not report["duplicate_interface_ips"], (
             f"duplicate interface-side IP assignments: {report['duplicate_interface_ips']}"
         )
-        print(f"ipam duplicate report: total={report['total']} assigned={report['assigned']}", flush=True)
+        print(
+            f"ipam duplicate report: total={report['total']} assigned={report['assigned']} "
+            f"primary_assigned={report['primary_assigned']} shared_mlag_vteps={len(report['shared_mlag_vteps'])}",
+            flush=True,
+        )
 
     # --- Component 11b: rack generator rerun regression -------------------
     @pytest.mark.asyncio(loop_scope="class")
@@ -687,49 +693,71 @@ class TestE2EPipeline(IntegrationStack):
     # --- Component 11b: DCI link hostvars ----------------------------------
     @pytest.mark.asyncio(loop_scope="class")
     async def test_dci_link_generates_l3_edge_hostvars(self, client: InfrahubClient, scenario_branch: str) -> None:
-        """A NetworkLink with role dci between Border Leafs generates stored l3_edge hostvars."""
+        """Both DCs' border pairs retain seed DCI links and allocate a new /31."""
         setup = await _create_dci_link_scenario(client, scenario_branch)
         await _run_generator_for_nodes(client, scenario_branch, GENERATOR_AVD_HOSTVAR, setup["device_ids"])
 
         report = await wait_until(
             fetch=lambda: _dci_hostvars_report(client, scenario_branch, setup["device_names"]),
-            ready=lambda r: r["ready"] and len(r["unique_matching_links"]) == 1,
+            ready=lambda r: r["ready"] and len(r["unique_matching_links"]) == len(setup["expected_links"]),
             timeout=GENERATOR_TIMEOUT,
             interval=POLL_INTERVAL,
             describe=f"DCI l3_edge hostvars for {DCI_LINK_NAME}",
         )
 
-        link = report["unique_matching_links"][0]
-        assert link["nodes"] == setup["device_names"]
-        assert link["interfaces"] == setup["interface_names"]
-        assert link["as"] == setup["expected_as"]
-        assert link["ip"] == ["10.253.253.0/31", "10.253.253.1/31"]
-        assert link["include_in_underlay_protocol"] is True
-        assert "profile" not in link
+        networks = set()
+        expected_interface_ips = {}
+        actual_links = {
+            (tuple(link["nodes"]), tuple(link["interfaces"])): link for link in report["unique_matching_links"]
+        }
+        assert set(actual_links) == set(setup["expected_links"])
+        for key, expected_as in setup["expected_links"].items():
+            link = actual_links[key]
+            assert link["as"] == expected_as
+            addresses = [ip_interface(address) for address in link["ip"]]
+            assert len(addresses) == 2
+            network = addresses[0].network
+            assert network.prefixlen == 31 and addresses[1].network == network
+            assert network.subnet_of(ip_network(DCI_POOL_PREFIX))
+            assert [address.ip for address in addresses] == list(network.hosts())
+            assert network not in networks, f"DCI links share {network}"
+            networks.add(network)
+            assert link["include_in_underlay_protocol"] is True
+            assert "profile" not in link
+            # Each endpoint's actual stored hostvars must contain its complete link.
+            assert all(link in report["hostvars"][name]["l3_edge"]["p2p_links"] for name in link["nodes"])
+            expected_interface_ips.update(
+                zip(zip(link["nodes"], link["interfaces"], strict=True), link["ip"], strict=True)
+            )
         assert all("p2p_links_profiles" not in hostvars.get("l3_edge", {}) for hostvars in report["hostvars"].values())
         # Materialize every single-valued relation touched by the scenario; an
         # accidental second peer produces a GraphQL cardinality error here.
-        await client.all(kind="NetworkFabric", branch=scenario_branch, include=["dci_pool"])
+        fabrics = await client.all(kind="NetworkFabric", branch=scenario_branch, include=["dci_pool"])
+        assert next(fabric for fabric in fabrics if fabric.id == setup["fabric_id"]).dci_pool.id == setup["pool_id"]
         endpoints = await client.filters(
             kind="DcimDevice",
             name__values=setup["device_names"],
             branch=scenario_branch,
             include=["asn", "pod", "avd_artifact"],
         )
-        assert len(endpoints) == 2
+        assert len(endpoints) == 4
+        assert all(device.role.value == "border_leaf" for device in endpoints)
+        assert len({device.pod.id for device in endpoints}) == 2
         interfaces = await client.filters(
             kind="InterfacePhysical",
-            name__value=DCI_INTERFACE_NAME,
+            name__values=["Ethernet5", "Ethernet6", DCI_INTERFACE_NAME],
+            device__ids=setup["device_ids"],
             branch=scenario_branch,
             include=["device", "connector", "ip_address"],
         )
-        assert len(interfaces) == 2
-        assert len({interface.connector.id for interface in interfaces}) == 1
+        assert len(interfaces) == 10
+        assert len({interface.connector.id for interface in interfaces}) == 5
         assert all(interface.ip_address.id for interface in interfaces)
-        assert {str(interface.ip_address.peer.address.value) for interface in interfaces} == {
-            "10.253.253.0/31",
-            "10.253.253.1/31",
-        }
+        device_names = {device.id: device.name.value for device in endpoints}
+        assert {
+            (device_names[interface.device.id], interface.name.value): str(interface.ip_address.peer.address.value)
+            for interface in interfaces
+        } == expected_interface_ips
         print(f"dci hostvars report: {report}", flush=True)
 
     # --- Component 12: artifacts generated ---------------------------------
@@ -1938,17 +1966,21 @@ async def _structured_config_ethernet_ip_refs(client: InfrahubClient, branch: st
 
 
 async def _create_dci_link_scenario(client: InfrahubClient, branch: str) -> dict:
-    """Create one complete DCI link using the shared connector workflow."""
-    candidates = await _dci_leaf_candidates(client, branch)
-    assert len(candidates) >= 2, f"expected two leaves with spare physical interfaces, got {candidates}"
-    left, right = candidates[:2]
+    """Extend the seeded two-DC design without replacing its pool or border roles."""
+    candidates = await _dci_border_candidates(client, branch)
+    assert [device["device_name"] for device in candidates] == [
+        f"leaf-infrahub-dc{dc}-1-{index}" for dc in (1, 2) for index in (1, 2)
+    ], f"expected both seeded border pairs, got {candidates}"
+    assert [device["pod_name"] for device in candidates] == ["infrahub-dc1"] * 2 + ["infrahub-dc2"] * 2
+    left, right = candidates[0], candidates[2]
 
-    await _ensure_dci_pool(client, branch, left["fabric_id"])
-
-    for device_id in (left["device_id"], right["device_id"]):
-        device = await client.get(kind="DcimDevice", id=device_id, branch=branch)
-        device.role.value = "border_leaf"
-        await device.save(allow_upsert=True)
+    fabric = await client.get(kind="NetworkFabric", id=left["fabric_id"], branch=branch, include=["dci_pool"])
+    pool_id = fabric.dci_pool.id
+    assert pool_id, f"{DCI_FABRIC} must retain its seeded DCI pool"
+    pool = await client.get(kind="CoreIPPrefixPool", id=pool_id, branch=branch, include=["resources"])
+    assert pool.name.value == DCI_POOL_NAME
+    assert pool.default_prefix_length.value == 31
+    assert {str(resource.peer.prefix.value) for resource in pool.resources.peers} == {DCI_POOL_PREFIX}
 
     dci_link = await client.create(
         kind="NetworkLink",
@@ -1976,26 +2008,37 @@ async def _create_dci_link_scenario(client: InfrahubClient, branch: str) -> dict
         endpoint["interface_id"] = dci_interface.id
         endpoint["interface_name"] = DCI_INTERFACE_NAME
 
+    # Retain every original inter-DC link as well as the newly created one.
+    expected_links = {}
+    for left_index, right_index, interface_name in (
+        (0, 2, "Ethernet5"),
+        (0, 3, "Ethernet6"),
+        (1, 3, "Ethernet5"),
+        (1, 2, "Ethernet6"),
+        (0, 2, DCI_INTERFACE_NAME),
+    ):
+        endpoints = [candidates[left_index], candidates[right_index]]
+        key = (tuple(device["device_name"] for device in endpoints), (interface_name, interface_name))
+        expected_links[key] = [device["device_asn"] for device in endpoints]
     return {
-        "device_ids": [left["device_id"], right["device_id"]],
-        "device_names": [left["device_name"], right["device_name"]],
-        "interface_names": [left["interface_name"], right["interface_name"]],
-        # Candidates are sorted by device name, matching the generator's endpoint
-        # ordering, so the AS list follows the same order.
-        "expected_as": [left["device_asn"], right["device_asn"]],
+        "device_ids": [device["device_id"] for device in candidates],
+        "device_names": [device["device_name"] for device in candidates],
+        "fabric_id": fabric.id,
+        "pool_id": pool_id,
+        "expected_links": expected_links,
     }
 
 
-async def _dci_leaf_candidates(client: InfrahubClient, branch: str) -> list[dict]:
+async def _dci_border_candidates(client: InfrahubClient, branch: str) -> list[dict]:
     query = """
-    query DciLeafCandidates {
-      DcimDevice(role__value: "leaf") {
+    query DciBorderCandidates {
+      DcimDevice(role__value: "border_leaf") {
         edges {
           node {
             id
             name { value }
             asn { node { asn { value } } }
-            pod { node { parent { node { id name { value } } } } }
+            pod { node { name { value } parent { node { id name { value } } } } }
           }
         }
       }
@@ -2012,7 +2055,7 @@ async def _dci_leaf_candidates(client: InfrahubClient, branch: str) -> list[dict
         device_asn = asn_node["asn"]["value"] if asn_node and asn_node.get("asn") else None
         if device_asn is None:
             continue
-        if fabric["name"]["value"] != "Fabric-L3LS-MultiPod-A":
+        if fabric["name"]["value"] != DCI_FABRIC:
             continue
         candidates.append(
             {
@@ -2021,33 +2064,12 @@ async def _dci_leaf_candidates(client: InfrahubClient, branch: str) -> list[dict
                 "device_asn": int(device_asn),
                 "fabric_id": fabric["id"],
                 "fabric_name": fabric["name"]["value"],
+                "pod_name": device["pod"]["node"]["name"]["value"],
                 "interface_id": None,
                 "interface_name": DCI_INTERFACE_NAME,
             }
         )
-    return sorted(candidates, key=itemgetter("device_name"))
-
-
-async def _ensure_dci_pool(client: InfrahubClient, branch: str, fabric_id: str) -> None:
-    fabric = await client.get(kind="NetworkFabric", id=fabric_id, branch=branch, include=["dci_pool"])
-    assert not fabric.dci_pool.id, "DCI scenario requires a fabric without an existing DCI pool"
-    prefix = await client.create(kind="IpamPrefix", branch=branch, prefix=DCI_POOL_PREFIX, role="technical")
-    await prefix.save(allow_upsert=True)
-    pool = await client.create(
-        kind="CoreIPPrefixPool",
-        branch=branch,
-        name=DCI_POOL_NAME,
-        default_member_type="prefix",
-        default_prefix_type="IpamPrefix",
-        default_prefix_length=31,
-        ip_namespace="default",
-        resources=[DCI_POOL_PREFIX],
-    )
-    await pool.save(allow_upsert=True)
-
-    fabric = await client.get(kind="NetworkFabric", id=fabric_id, branch=branch, include=["dci_pool"])
-    fabric.dci_pool = pool
-    await fabric.save(allow_upsert=True)
+    return sorted(candidates, key=itemgetter("pod_name", "device_name", "device_id"))
 
 
 async def _run_generator_for_nodes(
@@ -2186,7 +2208,7 @@ async def _dci_hostvars_report(client: InfrahubClient, branch: str, device_names
         matching_links.extend(
             link
             for link in device_hostvars.get("l3_edge", {}).get("p2p_links", [])
-            if link.get("nodes") == device_names or link.get("nodes") == list(reversed(device_names))
+            if len(link.get("nodes", [])) == 2 and set(link["nodes"]) <= set(device_names)
         )
 
     unique_matching_links = list(

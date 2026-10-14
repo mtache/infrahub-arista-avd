@@ -27,7 +27,11 @@ The fabric's `anta_enabled` flag is branch-aware. Its proposed-change scenario
 prepares a disabled destination before forking, enables the source, checks that
 the destination remains disabled, then restores the original baseline. The
 `dci_pool` field is agnostic; cleanup restores its initial value and deletes only
-the newly created DCI pool before checking the source snapshot. FileObjects use the file download endpoint with
+any newly created DCI pool before checking the source snapshot. The DCI scenario
+uses both border pairs in `Fabric-L3LS-Multi-Domain`, verifies its four seeded
+inter-DC links, then adds one cross-DC link with a `/31` from the existing pool.
+It verifies complete `l3_edge` contents for all four borders and materializes
+single-valued relationships after the scenario. FileObjects use the file download endpoint with
 their branch; rendered artifact content uses the object-storage endpoint.
 
 ```bash
