@@ -211,8 +211,10 @@ async def test_fabric_kickoffs_preserve_every_target_with_at_most_two_cascades(m
         events.append(("run", variables["nodes"]))
         return {"CoreGeneratorDefinitionRun": {"ok": True}}
 
-    async def settled(client: object, branch: str, before: set[str]) -> None:
+    async def settled(client: object, branch: str, before: set[str], *, expected_runs: dict[str, int]) -> None:
         assert client is not None and branch == pipeline.PIPELINE_BRANCH and before == set()
+        count = len(events[-1][1])
+        assert expected_runs == {pipeline.GENERATOR_FABRIC: count, pipeline.GENERATOR_AVD_STRUCTURED_CONFIG: count}
         events.append(("settled", None))
 
     client.execute_graphql = AsyncMock(side_effect=run)
@@ -222,6 +224,96 @@ async def test_fabric_kickoffs_preserve_every_target_with_at_most_two_cascades(m
     monkeypatch.setattr(pipeline, "wait_until", AsyncMock(return_value=[Mock()]))
     await pipeline.TestE2EPipeline()._prepare_fabric(client)
     assert events == [("run", ["A", "B"]), ("settled", None), ("run", ["C"]), ("settled", None)]
+
+
+@pytest.mark.asyncio
+async def test_task_barrier_waits_for_delayed_cascades_and_their_completion(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.integration import test_e2e_pipeline as pipeline
+
+    def task(identifier: str, name: str, state: str = "COMPLETED") -> SimpleNamespace:
+        return SimpleNamespace(id=identifier, title=f"Run generator {name}", workflow="generator-run", state=state)
+
+    rack = task("rack", pipeline.GENERATOR_RACK)
+    first = task("first", pipeline.GENERATOR_AVD_STRUCTURED_CONFIG)
+    delayed = task("delayed", pipeline.GENERATOR_AVD_STRUCTURED_CONFIG, "RUNNING")
+    completed = task("delayed", pipeline.GENERATOR_AVD_STRUCTURED_CONFIG)
+    reads = AsyncMock(
+        side_effect=[
+            [rack, first],
+            [rack, first],
+            [rack, first],
+            [rack, first, delayed],
+            [rack, first, completed],
+            [rack, first, completed],
+        ]
+    )
+    monkeypatch.setattr(pipeline, "_execution_tasks", reads)
+
+    async def fast_poll(**kwargs: object) -> object:
+        return await wait_until(**{**kwargs, "interval": 0.001})
+
+    monkeypatch.setattr(pipeline, "wait_until", fast_poll)
+    await pipeline._wait_for_tasks(
+        Mock(),
+        "scenario",
+        {"old"},
+        expected_runs={pipeline.GENERATOR_RACK: 1, pipeline.GENERATOR_AVD_STRUCTURED_CONFIG: 2},
+    )
+    assert reads.await_count == 6
+
+
+@pytest.mark.asyncio
+async def test_rack_snapshot_requires_local_structured_instances_for_every_fabric(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.integration import test_e2e_pipeline as pipeline
+
+    def instance(identifier: str, name: str) -> dict:
+        return {
+            "node": {
+                "id": identifier,
+                "name": {"value": identifier},
+                "status": {"value": "Ready"},
+                "object": {"node": {"id": identifier, "display_label": identifier}},
+                "definition": {"node": {"id": name, "name": {"value": name}}},
+            }
+        }
+
+    instances = [instance("rack", pipeline.GENERATOR_RACK), instance("a", pipeline.GENERATOR_AVD_STRUCTURED_CONFIG)]
+    metadata = {
+        "CoreGeneratorInstance": {"edges": instances},
+        "NetworkFabric": {
+            "edges": [
+                {"node": {"id": identifier, "name": {"value": identifier}, "avd_hostvars_ready": {"value": True}}}
+                for identifier in ("a", "b")
+            ]
+        },
+        "LocationRack": {
+            "edges": [{"node": {"id": "rack", "name": {"value": "rack"}, "generation_complete": {"value": True}}}]
+        },
+        "AvdStructuredConfigFile": {
+            "edges": [
+                {
+                    "node": {
+                        "id": "file",
+                        "file_name": {"value": "device.json"},
+                        "checksum": {"value": "hash"},
+                        "file_size": {"value": 100},
+                        "storage_id": {"value": "stored"},
+                        "artifact": {"node": {"name": {"value": "device"}}},
+                    }
+                }
+            ]
+        },
+    }
+    monkeypatch.setattr(pipeline, "_snapshot_collections", AsyncMock(return_value=metadata))
+    first = await pipeline._rack_rerun_snapshot(Mock(), "scenario", contents=False)
+    assert not first["ready"] and first["missing_structured_targets"] == ["b"]
+    assert len(first["state"]["generator_instances"]) == 2
+    instances.append(instance("b", pipeline.GENERATOR_AVD_STRUCTURED_CONFIG))
+    second = await pipeline._rack_rerun_snapshot(Mock(), "scenario", contents=False)
+    assert second["ready"] and not second["missing_structured_targets"]
+    assert len(second["state"]["generator_instances"]) == 3
 
 
 @pytest.mark.asyncio

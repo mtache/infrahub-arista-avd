@@ -79,6 +79,7 @@ REPO_NAME = "e2e-repository"
 # The cascade runs on this branch; trigger rules only fire off `main`.
 PIPELINE_BRANCH = "e2e-pipeline"
 GENERATOR_AVD_HOSTVAR = "generate-avd-device-hostvar"
+GENERATOR_AVD_STRUCTURED_CONFIG = "generate-avd-device-structured-config"
 SERVER_CABLING_RACK = "Rack-B2-1"
 SERVER_CABLING_SERVER = "e2e-server-b2-1"
 SERVER_CABLING_TEMPLATE = "multipod-b-compute-server-dual"
@@ -359,7 +360,12 @@ class TestE2EPipeline(IntegrationStack):
                 variables={"id": gen_def.id, "nodes": batch},
                 branch_name=PIPELINE_BRANCH,
             )
-            await _wait_for_tasks(client, PIPELINE_BRANCH, before)
+            await _wait_for_tasks(
+                client,
+                PIPELINE_BRANCH,
+                before,
+                expected_runs={GENERATOR_FABRIC: len(batch), GENERATOR_AVD_STRUCTURED_CONFIG: len(batch)},
+            )
             print(f"Fabric cascades settled: {batch}", flush=True)
 
         expected = await expected_super_spine_count(client, PIPELINE_BRANCH)
@@ -648,11 +654,16 @@ class TestE2EPipeline(IntegrationStack):
         racks = await client.all(kind="LocationRack", branch=scenario_branch)
         rack_targets = sorted((rack.name.value, rack.id) for rack in racks)
         assert any(name == "DC1_BORDER" for name, _ in rack_targets), "DC1_BORDER rack not found"
+        fabrics = await client.all(kind="NetworkFabric", branch=scenario_branch)
 
         snapshots = []
         for pass_number in (1, 2):
             await _run_generator_for_nodes(
-                client, scenario_branch, GENERATOR_RACK, [rack_id for _, rack_id in rack_targets]
+                client,
+                scenario_branch,
+                GENERATOR_RACK,
+                [rack_id for _, rack_id in rack_targets],
+                cascade_runs={GENERATOR_AVD_STRUCTURED_CONFIG: len(fabrics)},
             )
             snapshot = await wait_until(
                 fetch=lambda: _rack_rerun_snapshot(client, scenario_branch, contents=False),
@@ -1571,6 +1582,10 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
         count
         edges { node { id name { value } generation_complete { value } } }
       }
+      NetworkFabric(offset: $offset, limit: $limit) {
+        count
+        edges { node { id name { value } avd_hostvars_ready { value } } }
+      }
       IpamIPAddress(offset: $offset, limit: $limit) @include(if: $details) {
         count
         edges {
@@ -1613,6 +1628,18 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
     rack_generator_instances = [
         instance for instance in generator_instances if instance["definition_name"] == GENERATOR_RACK
     ]
+    # Generator instances are branch-local. Inherited files alone cannot prove
+    # that every fabric's new cascade has run on this scenario branch.
+    fabrics = resp["NetworkFabric"]["edges"]
+    structured_targets = {
+        edge["node"]["object"]["node"]["id"]
+        for edge in resp["CoreGeneratorInstance"]["edges"]
+        if edge["node"]["definition"]["node"]["name"]["value"] == GENERATOR_AVD_STRUCTURED_CONFIG
+        and edge["node"]["status"]["value"] == "Ready"
+    }
+    missing_structured_targets = sorted(
+        edge["node"]["name"]["value"] for edge in fabrics if edge["node"]["id"] not in structured_targets
+    )
     rack_errors = [instance for instance in rack_generator_instances if instance["status"] == "Error"]
     active = [
         instance
@@ -1665,10 +1692,14 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
             and not rack_errors
             and not active
             and all(complete for _, complete in racks)
+            and bool(fabrics)
+            and all(edge["node"]["avd_hostvars_ready"]["value"] for edge in fabrics)
+            and not missing_structured_targets
             and bool(structured_config_files)
         ),
         "rack_errors": rack_errors,
         "active_generator_instances": active,
+        "missing_structured_targets": missing_structured_targets,
         "state": state,
     }
 
@@ -1923,7 +1954,12 @@ async def _ensure_dci_pool(client: InfrahubClient, branch: str, fabric_id: str) 
 
 
 async def _run_generator_for_nodes(
-    client: InfrahubClient, branch: str, generator_name: str, node_ids: list[str]
+    client: InfrahubClient,
+    branch: str,
+    generator_name: str,
+    node_ids: list[str],
+    *,
+    cascade_runs: dict[str, int] | None = None,
 ) -> None:
     before = {task.id for task in await _pipeline_tasks(client, branch)}
     gen_def = await client.get(kind="CoreGeneratorDefinition", name__value=generator_name, branch=branch)
@@ -1939,18 +1975,29 @@ async def _run_generator_for_nodes(
             variables={"id": gen_def.id, "nodes": node_ids},
             branch_name=branch,
         )
-    await _wait_for_tasks(client, branch, before)
+    await _wait_for_tasks(client, branch, before, expected_runs={generator_name: len(node_ids), **(cascade_runs or {})})
 
 
-async def _wait_for_tasks(client: InfrahubClient, branch: str, before: set[str]) -> None:
+async def _wait_for_tasks(
+    client: InfrahubClient, branch: str, before: set[str], *, expected_runs: dict[str, int] | None = None
+) -> None:
     """Observe the new execution and its cascades, never accept stale Ready nodes."""
     quiet = 0
+    previous_ids: set[str] = set()
 
     async def fetch() -> tuple[list, bool]:
-        nonlocal quiet
+        nonlocal quiet, previous_ids
         tasks = await _execution_tasks(client, branch, before)
         active = [task for task in tasks if task.state != "COMPLETED"]
-        quiet = quiet + 1 if tasks and not active else 0
+        expected_seen = all(
+            sum(task.workflow == "generator-run" and task.title == f"Run generator {name}" for task in tasks) >= count
+            for name, count in (expected_runs or {}).items()
+        )
+        task_ids = {task.id for task in tasks}
+        if task_ids != previous_ids:
+            quiet = 0
+        quiet = quiet + 1 if tasks and not active and expected_seen else 0
+        previous_ids = task_ids
         return tasks, quiet >= 2
 
     tasks, _ = await wait_until(
