@@ -61,6 +61,9 @@ keeps later rack regeneration targeted. It
 observes new task IDs and their cascades, including generator/artifact tasks
 without branch metadata. Snapshot polling reads metadata; once settled,
 comparisons read actual storage contents, checksums and IP assignments.
+Unchanged devices remain enrolled in their topology target's tracking group
+without rewriting preserved fields; missing device intent and interfaces still
+run through reconciliation and remain covered by both full rack snapshots.
 IP uniqueness checks include primary interface assignments. Sharing is accepted
 only for the same VTEP IP on the two virtual `Loopback1` interfaces of an exact
 two-peer MLAG domain, with matching device VTEP references; other duplicates fail.

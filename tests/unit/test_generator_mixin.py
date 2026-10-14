@@ -363,7 +363,7 @@ async def test_create_avd_device_preserves_existing_non_empty_serial() -> None:
     gen = _make_generator()
     existing_device = _device_with_relationships(serial="SERIAL1")
     saved_device = _device()
-    gen.client.filters.return_value = [SimpleNamespace(id="device-1")]
+    gen.client.filters.return_value = [existing_device]
     gen.client.get.return_value = existing_device
     gen.client.create.return_value = saved_device
 
@@ -380,11 +380,46 @@ async def test_create_avd_device_preserves_existing_non_empty_serial() -> None:
 
 
 @pytest.mark.asyncio
+async def test_unchanged_device_survives_two_tracking_runs_without_rewriting_preserved_fields() -> None:
+    gen = _make_generator()
+    existing = _device_with_relationships(status="active", role="border_leaf", group_ids=["avd_devices"], asn_id="asn")
+    existing.index.value = 1
+    existing.object_template.id = "template-1"
+    existing.pod.id = "pod-1"
+    gen.client.filters.return_value = [existing]
+    gen._reconcile_physical_interfaces_from_template = AsyncMock()  # type: ignore[method-assign]
+    gen._ensure_device_asn = AsyncMock()  # type: ignore[method-assign]
+    surviving_ids = {existing.id}
+    for _ in range(2):
+        context = SimpleNamespace(identifier="rack-target", add_related_nodes=AsyncMock())
+        gen.client.group_context = context
+        device = await gen.create_avd_device(
+            name="leaf-a",
+            role="leaf",
+            object_template_id="template-1",
+            pod_id="pod-1",
+            fabric_id="fabric-1",
+            index=1,
+            asn_pool=object(),
+        )
+        assert device is existing and existing.role.value == "border_leaf"
+        context.add_related_nodes.assert_awaited_once_with(ids=[existing.id])
+        surviving_ids.intersection_update(context.add_related_nodes.await_args.kwargs["ids"])
+    assert surviving_ids == {existing.id}
+    existing.save.assert_not_awaited()
+    gen.client.create.assert_not_awaited()
+    gen.client.get.assert_not_awaited()
+    gen._ensure_device_asn.assert_not_awaited()
+    assert gen._reconcile_physical_interfaces_from_template.await_count == 2
+    assert all(call.kwargs["include"] == gen._DEVICE_RECONCILE_INCLUDE for call in gen.client.filters.await_args_list)
+
+
+@pytest.mark.asyncio
 async def test_create_avd_device_preserves_existing_non_empty_mgmt_ip() -> None:
     gen = _make_generator()
     existing_device = _device_with_relationships(mgmt_ip_id="mgmt-existing")
     saved_device = _device()
-    gen.client.filters.return_value = [SimpleNamespace(id="device-1")]
+    gen.client.filters.return_value = [existing_device]
     gen.client.get.return_value = existing_device
     gen.client.create.return_value = saved_device
 
@@ -405,7 +440,7 @@ async def test_create_avd_device_populates_missing_generated_relationships() -> 
     gen = _make_generator()
     existing_device = _device_with_relationships()
     saved_device = _device()
-    gen.client.filters.return_value = [SimpleNamespace(id="device-1")]
+    gen.client.filters.return_value = [existing_device]
     gen.client.get.return_value = existing_device
     gen.client.create.return_value = saved_device
     gen._ensure_device_asn = AsyncMock()  # type: ignore[method-assign]
@@ -438,7 +473,7 @@ async def test_create_avd_device_includes_preserved_required_attributes_without_
     gen = _make_generator()
     existing_device = _device_with_relationships(status="active", role="spine", node_id=7)
     saved_device = _device()
-    gen.client.filters.return_value = [SimpleNamespace(id="device-1")]
+    gen.client.filters.return_value = [existing_device]
     gen.client.get.return_value = existing_device
     gen.client.create.return_value = saved_device
 
@@ -487,7 +522,7 @@ async def test_create_avd_device_backfills_missing_template_physical_interfaces(
     )
     existing_interface = SimpleNamespace(id="manual-port", name=SimpleNamespace(value="Ethernet1"))
     gen.client.filters.side_effect = [
-        [SimpleNamespace(id="device-1")],
+        [existing_device],
         [template_interface_existing, template_interface_missing],
         [existing_interface],
     ]
@@ -576,7 +611,7 @@ async def test_create_avd_device_adds_avd_group_without_removing_existing_groups
     gen = _make_generator()
     existing_device = _device_with_relationships(group_ids=["ops-group"])
     saved_device = _device()
-    gen.client.filters.return_value = [SimpleNamespace(id="device-1")]
+    gen.client.filters.return_value = [existing_device]
     gen.client.get.return_value = existing_device
     gen.client.create.return_value = saved_device
 
@@ -596,7 +631,7 @@ async def test_create_avd_device_logs_preserved_populated_and_skipped_field_deci
     gen = _make_generator()
     existing_device = _device_with_relationships(serial="SERIAL1", mgmt_ip_id="mgmt-existing")
     saved_device = _device()
-    gen.client.filters.return_value = [SimpleNamespace(id="device-1")]
+    gen.client.filters.return_value = [existing_device]
     gen.client.get.return_value = existing_device
     gen.client.create.return_value = saved_device
     gen.logger = MagicMock()

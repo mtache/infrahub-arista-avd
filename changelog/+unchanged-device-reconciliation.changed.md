@@ -1,0 +1,1 @@
+Reuse the typed device reconciliation read and retain unchanged devices in their topology tracking group without rewriting preserved fields or rereading an existing ASN. Missing fields, group membership, interfaces and allocations still follow normal reconciliation.
