@@ -18,6 +18,8 @@ def _make_generator() -> GeneratorMixin:
     gen.client.create = AsyncMock()
     gen.client.execute_graphql = AsyncMock()
     gen.client.get = AsyncMock()
+    gen.client.group_context.get_group = AsyncMock(return_value=None)
+    gen.client.group_context.add_related_nodes = AsyncMock()
     return gen
 
 
@@ -439,7 +441,7 @@ async def test_create_avd_device_backfills_missing_template_physical_interfaces(
         mac_address=SimpleNamespace(value=""),
         index=SimpleNamespace(value=None),
     )
-    existing_interface = SimpleNamespace(name=SimpleNamespace(value="Ethernet1"))
+    existing_interface = SimpleNamespace(id="manual-port", name=SimpleNamespace(value="Ethernet1"))
     gen.client.filters.side_effect = [
         [SimpleNamespace(id="device-1")],
         [template_interface_existing, template_interface_missing],
@@ -466,6 +468,63 @@ async def test_create_avd_device_backfills_missing_template_physical_interfaces(
         "description": "uplink",
     }
     created_interface.save.assert_awaited_once_with(allow_upsert=True)
+
+
+@pytest.mark.asyncio
+async def test_template_ports_survive_tracking_cleanup_on_unchanged_second_run() -> None:
+    gen = _make_generator()
+    template_ports = [SimpleNamespace(name=SimpleNamespace(value=name)) for name in ("Ethernet1", "Ethernet2")]
+    manual = SimpleNamespace(id="manual-port", name=SimpleNamespace(value="Ethernet1"), save=AsyncMock())
+    generated = SimpleNamespace(id="generated-port", name=SimpleNamespace(value="Ethernet2"), save=AsyncMock())
+    interfaces = [manual]
+    previous_ids: set[str] = set()
+
+    async def filters(kind: object, **kwargs: object) -> list[SimpleNamespace]:
+        return template_ports if kind == "TemplateInterfacePhysical" else interfaces
+
+    gen.client.filters.side_effect = filters
+    gen.client.create.return_value = generated
+
+    for _ in range(2):
+        tracked_ids: list[str] = []
+
+        async def save(tracked: list[str] = tracked_ids, **kwargs: object) -> None:
+            assert kwargs == {"allow_upsert": True}
+            interfaces.append(generated)
+            tracked.append(generated.id)
+
+        generated.save.side_effect = save
+        group = SimpleNamespace(members=SimpleNamespace(peer_ids=list(previous_ids))) if previous_ids else None
+
+        async def retain(ids: list[str], tracked: list[str] = tracked_ids) -> None:
+            tracked.extend(ids)
+
+        gen.client.group_context = SimpleNamespace(
+            identifier="generate-rack",
+            get_group=AsyncMock(return_value=group),
+            add_related_nodes=AsyncMock(side_effect=retain),
+        )
+        await gen._reconcile_physical_interfaces_from_template("device-1", "template-1")
+        deleted_ids = previous_ids - set(tracked_ids)
+        interfaces[:] = [interface for interface in interfaces if interface.id not in deleted_ids]
+        previous_ids = set(tracked_ids)
+        assert previous_ids == {generated.id}
+        assert {interface.id for interface in interfaces} == {manual.id, generated.id}
+
+    generated.save.assert_awaited_once()
+    manual.save.assert_not_awaited()
+    gen.client.create.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_template_tracking_does_not_retain_ports_removed_from_template() -> None:
+    gen = _make_generator()
+    gen.client.group_context.get_group.return_value = SimpleNamespace(members=SimpleNamespace(peer_ids=["old-port"]))
+    await gen._retain_template_interfaces(
+        [SimpleNamespace(id="old-port", name=SimpleNamespace(value="Ethernet2"))],
+        [SimpleNamespace(name=SimpleNamespace(value="Ethernet1"))],
+    )
+    gen.client.group_context.add_related_nodes.assert_not_awaited()
 
 
 @pytest.mark.asyncio

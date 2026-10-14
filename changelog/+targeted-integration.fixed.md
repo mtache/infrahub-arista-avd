@@ -1,1 +1,1 @@
-Correct the MultiPod-B server profile name and keep backfill writes from claiming topology-owned interfaces. Make integration scenarios independently selectable, isolate graph mutations, share seed-matrix setup and bound metadata polling and storage reads.
+Correct the MultiPod-B server profile name, retain generated template ports on reruns and keep cabling and backfill writes from claiming existing physical interfaces. Make integration scenarios independently selectable, isolate graph mutations, share seed-matrix setup and bound metadata polling and storage reads.

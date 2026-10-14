@@ -168,6 +168,11 @@ rack devices and their pod spines. The hostvar generator uses the same grouped
 read before setting the fabric ready for structured configuration. Both pod
 and rack membership are included, and devices from other fabrics are excluded.
 
+Template reconciliation retains physical ports already owned by the target's
+tracking group on an unchanged run. Existing manual ports stay outside that
+group. Cabling updates connectors without claiming either endpoint, so a rack
+rerun cannot delete a spine port through its own cleanup.
+
 ```graphql
 query RackGenerator($rack_id: String!) {
   LocationRack(ids: [$rack_id]) {
@@ -226,6 +231,11 @@ For EVPN Multi-Domain Gateway hostvars, the query fetches `EvpnGatewayGroup.loca
 
 **Query**: `generate_avd.gql`
 
+Unchanged hostvar files keep the fabric ready. A device rerun marks the fabric
+pending only before writing changed or missing hostvars, avoiding redundant
+structured-config cascades on unchanged input. Rack reconciliations can still
+mark the fabric pending and its final readiness check restores the flag.
+
 ### ServerCablingGenerator
 
 **File**: `generators/generate_server_cabling.py`
@@ -253,6 +263,10 @@ Because steps 3–5 run on every invocation, the generator is the reconciliation
 creation path: re-running it after a VLAN or LAG change updates an already-cabled server without
 producing duplicate links. The operator-facing walkthrough is
 [Add a Server](../how-to/add-server.md).
+
+The server generator tracks its links and LAGs. Updates to existing physical
+ports and their VLAN relationships use `update_group_context=False`, preserving
+the ownership of the device/template generator.
 
 ### BackfillStructuredConfigGenerator
 

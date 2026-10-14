@@ -211,8 +211,8 @@ class TestConnectInterfaceMaps:
         assert dst_fetched_iface.connector is network_link
         assert src_fetched_iface.status.value == "active"
         assert dst_fetched_iface.status.value == "active"
-        src_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
-        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
+        src_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     @pytest.mark.asyncio
     async def test_creates_uplink_with_device_pair_name_and_role_without_medium(self) -> None:
@@ -360,7 +360,7 @@ class TestConnectInterfaceMaps:
         assert src_fetched_iface.connector.id == "manual-link"
         src_fetched_iface.save.assert_not_awaited()
         assert dst_fetched_iface.connector is network_link
-        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
+        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
         assert any("Skipped connector reconciliation" in call.args[0] for call in logger.warning.call_args_list)
 
     @pytest.mark.asyncio
@@ -382,8 +382,8 @@ class TestConnectInterfaceMaps:
 
         assert src_fetched_iface.connector is network_link
         assert dst_fetched_iface.connector is network_link
-        src_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
-        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True)
+        src_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+        dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
 
 def test_parallel_uplink_suffixes_are_stable_and_naturally_ordered() -> None:

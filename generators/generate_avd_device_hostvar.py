@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import operator
 import re
@@ -2319,9 +2320,6 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         pod = device.pod.node
         fabric = pod.parent.node
 
-        # Mark hostvars as not ready while regenerating
-        await set_fabric_avd_hostvars_ready(self.client, fabric.id, False)
-
         # Extract basic device info
         device_id = device.id
         hostname = device.name.value
@@ -2523,8 +2521,6 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         )
 
         # Validate hostvars against pyAVD schema before saving
-        import json
-
         from pyavd import validate_inputs
 
         validated = validate_inputs(hostvars)
@@ -2538,6 +2534,10 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
             error_detail = "; ".join(violation_msgs)
             raise ValueError(f"pyAVD validation failed for {hostname}: {error_detail}")
 
+        await self._store_hostvars(fabric_id=fabric.id, device_id=device_id, hostname=hostname, hostvars=hostvars)
+
+    async def _store_hostvars(self, *, fabric_id: str, device_id: str, hostname: str, hostvars: dict[str, Any]) -> None:
+        """Reconcile the file, marking the fabric pending only when content changes."""
         new_content = json.dumps(hostvars, indent=2).encode()
         new_checksum = hashlib.sha256(new_content).hexdigest()
 
@@ -2569,6 +2569,13 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
                 self.logger.warning("Could not read existing hostvar file for %s, forcing re-upload: %s", hostname, exc)
                 existing_file = None
 
+        # A no-op device rerun leaves the existing file ready. Toggling False
+        # for every device would trigger redundant full-fabric structured-config
+        # runs when each one toggles back to True. Changed/missing files still
+        # mark the fabric pending before the write, including when it fails.
+        if existing_file is None or existing_checksum != new_checksum:
+            await set_fabric_avd_hostvars_ready(self.client, fabric_id, False)
+
         uploaded = await save_file_if_changed(
             existing_file=existing_file,
             existing_checksum=existing_checksum,
@@ -2583,4 +2590,4 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         else:
             self.logger.info(f"Hostvars updated for {hostname}")
 
-        await check_fabric_hostvars_ready(self.client, fabric.id)
+        await check_fabric_hostvars_ready(self.client, fabric_id)

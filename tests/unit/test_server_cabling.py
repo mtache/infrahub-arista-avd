@@ -518,7 +518,7 @@ class TestVlanAssignment:
 
         server_member.tagged_vlan.remove.assert_called_once_with("vlan-300")
         server_member.untagged_vlan.fetch.assert_not_awaited()
-        server_member.save.assert_awaited_once_with(allow_upsert=True)
+        server_member.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     @pytest.mark.asyncio
     async def test_apply_untagged_vlan_assigns_without_fetching(self) -> None:
@@ -537,7 +537,7 @@ class TestVlanAssignment:
 
         fetch.assert_not_awaited()
         assert target.untagged_vlan == {"id": "vlan-100"}
-        target.save.assert_awaited_once_with(allow_upsert=True)
+        target.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
 
 class TestNoLeafSwitches:

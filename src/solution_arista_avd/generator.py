@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from infrahub_sdk import InfrahubClient
+    from infrahub_sdk.node import RelationshipManager
 
     from .protocols import LocationRack, NetworkPod
 
@@ -893,6 +894,7 @@ class GeneratorMixin:
             for interface in existing_interfaces
             if (name := self._attribute_value(getattr(interface, "name", None)))
         }
+        await self._retain_template_interfaces(existing_interfaces, template_interfaces)
 
         for template_interface in template_interfaces:
             name = self._attribute_value(getattr(template_interface, "name", None))
@@ -911,6 +913,27 @@ class GeneratorMixin:
             interface = await self.client.create(InterfacePhysical, **interface_kwargs)  # type: ignore[type-abstract]
             await interface.save(allow_upsert=True)
             existing_names.add(name)
+
+    async def _retain_template_interfaces(self, interfaces: Sequence[Any], templates: Sequence[Any]) -> None:
+        """Keep this target's previously created ports without claiming manual ones."""
+        context = self.client.group_context
+        if not context.identifier:
+            return
+        cached = getattr(self, "_template_interface_ownership", None)
+        if cached is None or cached[0] is not context:
+            group = await context.get_group()
+            owned_ids = set(cast("RelationshipManager", group.members).peer_ids) if group else set()
+            self._template_interface_ownership = (context, owned_ids)
+        else:
+            owned_ids = cached[1]
+        template_names = {self._attribute_value(getattr(template, "name", None)) for template in templates}
+        retained_ids = [
+            interface.id
+            for interface in interfaces
+            if self._attribute_value(getattr(interface, "name", None)) in template_names and interface.id in owned_ids
+        ]
+        if retained_ids:
+            await context.add_related_nodes(ids=retained_ids)
 
     @staticmethod
     def _has_non_empty_value(attribute: object) -> bool:

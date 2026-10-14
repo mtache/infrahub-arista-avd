@@ -16,9 +16,16 @@ fabric scenario (skipped without `--fabric`). The performance target is less tha
 Each E2E node ID selects its prerequisites through lazy fixtures; preceding test
 methods no longer need to be selected. Only the fabric generator initiates the
 baseline. Pod, rack, structured configuration and backfill generation still run
-through the real triggers. Fabric kickoffs wait for their cascades sequentially
-to avoid overloading the CI-sized API. Graph mutations fork the settled baseline
-and verify that their source state remains unchanged.
+through the real triggers. At most two fabrics cascade concurrently; each batch
+settles before the next kickoff, with one stack and the same CI resources. Graph
+mutations use distinct branches from the generated baseline, published once into
+the temporary default branch because Infrahub 1.11 requires that origin. The
+source graph is checked after each scenario. Artifacts are generated before the
+publication so their ready files are available on the scenario branches.
+The fabric's `anta_enabled` and `dci_pool` fields are agnostic. Scenario cleanup
+restores their initial values and deletes only its newly created DCI pool before
+checking the source snapshot. FileObjects use the file download endpoint with
+their branch; rendered artifact content uses the object-storage endpoint.
 
 ```bash
 uv run --no-sync pytest \
@@ -46,7 +53,7 @@ observes new task IDs and their cascades, including generator/artifact tasks
 without branch metadata. Snapshot polling reads metadata; once settled,
 comparisons read actual storage contents, checksums and IP assignments.
 Storage downloads are cached per client and storage ID with at most two concurrent
-reads. Transient reads have bounded retries and respect `Retry-After`; permanent
+reads. Each artifact definition settles before the next one is triggered. Transient reads have bounded retries and respect `Retry-After`; permanent
 GraphQL errors and failed tasks stop the test immediately. Mutations are never
 replayed by the read retry helper.
 

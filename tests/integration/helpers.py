@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlencode
 from weakref import WeakKeyDictionary
 
 import httpx
@@ -181,7 +182,7 @@ async def _retry_read[T](fetch: Callable[[], Awaitable[T]]) -> T:
 _storage_caches: WeakKeyDictionary = WeakKeyDictionary()
 
 
-async def storage_content(client: InfrahubClient, storage_id: str) -> str:
+async def storage_content(client: InfrahubClient, storage_id: str, *, file_branch: str | None = None) -> str:
     """Read immutable storage content once per instance, with two concurrent reads."""
     if client not in _storage_caches:
         _storage_caches[client] = ({}, asyncio.Semaphore(2))
@@ -189,7 +190,17 @@ async def storage_content(client: InfrahubClient, storage_id: str) -> str:
 
     async def download() -> str:
         async with semaphore:
-            return await read_with_retry(lambda: client.object_store.get(identifier=storage_id))
+            if file_branch is None:
+                return await read_with_retry(lambda: client.object_store.get(identifier=storage_id))
+
+            async def file_content() -> str:
+                response = await client._get(
+                    f"{client.address}/api/storage/files/by-storage-id/{storage_id}?{urlencode({'branch': file_branch})}"
+                )
+                response.raise_for_status()
+                return response.text
+
+            return await read_with_retry(file_content)
 
     if storage_id not in cache:
         cache[storage_id] = asyncio.create_task(download())

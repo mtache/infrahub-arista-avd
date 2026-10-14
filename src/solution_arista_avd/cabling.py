@@ -308,7 +308,9 @@ async def _connect_fetched_interface_if_missing(
     # SDK accepts protocol kinds at runtime; assigning a node to a relationship is the SDK pattern.
     iface.connector = network_link  # type: ignore[assignment]
     iface.status.value = "active"
-    await iface.save(allow_upsert=True)
+    # Physical ports belong to their device/template generator, while this run
+    # owns the link. Claiming an upstream port lets a later no-op delete it.
+    await iface.save(allow_upsert=True, update_group_context=False)
     logger.info("Populated missing connector on %s", iface.display_label)
     return True
 

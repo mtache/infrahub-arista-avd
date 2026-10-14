@@ -162,7 +162,7 @@ class TestE2EPipeline(IntegrationStack):
         return True
 
     @pytest_asyncio.fixture(scope="class", loop_scope="class")
-    async def pipeline_published(self, pipeline_ready: bool, client: InfrahubClient, default_branch: str):
+    async def pipeline_published(self, artifacts_ready: bool, client: InfrahubClient, default_branch: str):
         # Infrahub 1.11 only supports branches originating from the default
         # branch. Publish once inside this temporary stack, after its cascade
         # settles, so every scenario inherits the same generated graph.
@@ -175,10 +175,14 @@ class TestE2EPipeline(IntegrationStack):
     async def scenario_branch(self, pipeline_published: str, client: InfrahubClient, request: pytest.FixtureRequest):
         name = request.node.name.removeprefix("test_").replace("_", "-")
         original = await _scenario_isolation_state(client, pipeline_published)
-        yield await create_branch(client, name, pipeline_published)
-        assert await _scenario_isolation_state(client, pipeline_published) == original, (
-            f"Scenario {name} leaked into baseline"
-        )
+        branch = await create_branch(client, name, pipeline_published)
+        try:
+            yield branch
+        finally:
+            await _restore_shared_fabric_fields(client, pipeline_published, original)
+            assert await _scenario_isolation_state(client, pipeline_published) == original, (
+                f"Scenario {name} leaked into baseline"
+            )
 
     @staticmethod
     def _address(infrahub_port: int) -> str:
@@ -316,10 +320,11 @@ class TestE2EPipeline(IntegrationStack):
         fabrics = await client.all(kind="NetworkFabric", branch=PIPELINE_BRANCH)
         fabric_ids = [fabric.id for fabric in sorted(fabrics, key=lambda fabric: fabric.name.value)]
         assert fabric_ids, "no fabrics found on the pipeline branch"
-        # Let each fabric's trigger-driven cascade settle before the next
-        # kickoff. All fabrics and downstream generators are still exercised;
-        # overlapping their backfills overloads the CI-sized API server.
-        for fabric_id in fabric_ids:
+        # Bound fanout to two independent fabrics. Waiting for all seven in
+        # series dominates bootstrap time; kicking off all seven at once floods
+        # the CI-sized API. Every target and downstream trigger remains exercised.
+        for offset in range(0, len(fabric_ids), 2):
+            batch = fabric_ids[offset : offset + 2]
             before = {task.id for task in await _pipeline_tasks(client, PIPELINE_BRANCH)}
             await client.execute_graphql(
                 query="""
@@ -329,11 +334,11 @@ class TestE2EPipeline(IntegrationStack):
                     }
                 }
                 """,
-                variables={"id": gen_def.id, "nodes": [fabric_id]},
+                variables={"id": gen_def.id, "nodes": batch},
                 branch_name=PIPELINE_BRANCH,
             )
             await _wait_for_tasks(client, PIPELINE_BRANCH, before)
-            print(f"Fabric cascade settled: {fabric_id}", flush=True)
+            print(f"Fabric cascades settled: {batch}", flush=True)
 
         expected = await expected_super_spine_count(client, PIPELINE_BRANCH)
         super_spines = await wait_until(
@@ -527,22 +532,16 @@ class TestE2EPipeline(IntegrationStack):
             status="provisioning",
             member_of_groups=["servers"],
         )
+        before = {task.id for task in await _pipeline_tasks(client, scenario_branch)}
         await server.save(allow_upsert=True)
+        await _wait_for_tasks(client, scenario_branch, before)
+        report = await read_with_retry(lambda: _server_cabling_report(client, scenario_branch, SERVER_CABLING_SERVER))
 
-        report = await wait_until(
-            fetch=lambda: _server_cabling_report(client, scenario_branch, SERVER_CABLING_SERVER),
-            ready=lambda r: (
-                r["server_link_count"] == 2
-                and r["server_physical_count"] == 2
-                and r["server_connected_count"] == 2
-                and r["server_bond_count"] == 1
-                and r["leaf_port_channel_count"] == 2
-                and r["leaf_port_channel_member_count"] == 2
-            ),
-            timeout=GENERATOR_TIMEOUT,
-            interval=POLL_INTERVAL,
-            describe=f"server cabling output for {SERVER_CABLING_SERVER}",
-        )
+        # The completed trigger cascade makes these exact quantities final;
+        # a model mismatch should fail here instead of consuming a polling timeout.
+        assert report["server_physical_count"] == 2, report
+        assert report["server_connected_count"] == 2, report
+        assert report["server_bond_count"] == 1, report
 
         assert report["server_physical_lags"] == {"Ethernet1": "Bond1", "Ethernet2": "Bond1"}
         assert report["server_bond_members"] == ["Ethernet1", "Ethernet2"]
@@ -557,7 +556,8 @@ class TestE2EPipeline(IntegrationStack):
         )
         assert report["leaf_port_channel_count"] == 2
         assert report["leaf_port_channel_member_count"] == 2
-        assert report["leaf_port_channel_ids"] == [1117, 1117]
+        # MultiPod-B now uses the Arista template: Ethernet1 determines ID 1.
+        assert report["leaf_port_channel_ids"] == [1, 1]
         print(f"server cabling report: {report}", flush=True)
 
     # --- Component 11: AVD structured config (via trigger cascade) ---------
@@ -686,11 +686,15 @@ class TestE2EPipeline(IntegrationStack):
             kind="InterfacePhysical",
             name__value=DCI_INTERFACE_NAME,
             branch=scenario_branch,
-            include=["device", "connector", "ip_addresses"],
+            include=["device", "connector", "ip_address"],
         )
         assert len(interfaces) == 2
         assert len({interface.connector.id for interface in interfaces}) == 1
-        assert all(len(interface.ip_addresses.peers) == 1 for interface in interfaces)
+        assert all(interface.ip_address.id for interface in interfaces)
+        assert {str(interface.ip_address.peer.address.value) for interface in interfaces} == {
+            "10.253.253.0/31",
+            "10.253.253.1/31",
+        }
         print(f"dci hostvars report: {report}", flush=True)
 
     # --- Component 12: artifacts generated ---------------------------------
@@ -805,9 +809,6 @@ class TestE2EPipeline(IntegrationStack):
         # Establish disabled-marker catalogs before the proposed change. This
         # makes the subsequent marker -> populated transition prove that the
         # proposed-change artifact validator actually re-rendered the devices.
-        initial_storage = await _fetch_ready_artifact_storage_by_target(
-            client, scenario_branch, ARTIFACT_AVD_ANTA_CATALOG
-        )
         previous_tasks = {task.id for task in await _pipeline_tasks(client, scenario_branch)}
         fabric.anta_enabled.value = False
         await fabric.save()
@@ -817,8 +818,14 @@ class TestE2EPipeline(IntegrationStack):
         )
         response.raise_for_status()
         await _wait_for_tasks(client, scenario_branch, previous_tasks)
-        disabled_storage = await _wait_for_new_artifact_storage(
-            client, scenario_branch, ARTIFACT_AVD_ANTA_CATALOG, set(device_ids_by_name), initial_storage
+        # Unchanged disabled catalogs may retain their immutable storage IDs.
+        # The completed new task plus the actual marker establishes this state.
+        disabled_storage = await wait_until(
+            fetch=lambda: _fetch_ready_artifact_storage_by_target(client, scenario_branch, ARTIFACT_AVD_ANTA_CATALOG),
+            ready=lambda storage: set(device_ids_by_name) <= storage.keys(),
+            timeout=ARTIFACT_TIMEOUT,
+            interval=POLL_INTERVAL,
+            describe="Ready disabled ANTA catalogs after explicit generation",
         )
         disabled = {name: await storage_content(client, identifier) for name, identifier in disabled_storage.items()}
         assert all(ANTA_DISABLED_MARKER in disabled.get(name, "") for name in device_ids_by_name)
@@ -890,6 +897,7 @@ async def _scenario_isolation_state(client: InfrahubClient, branch: str) -> dict
         lambda: client.execute_graphql(
             query="""query {
       NetworkFabric { edges { node { id anta_enabled { value } dci_pool { node { id } } } } }
+      CoreIPPrefixPool { edges { node { id name { value } } } }
       DcimDevice { edges { node { id role { value } } } }
       ComputePhysicalServer { edges { node { id name { value } } } }
       InterfacePhysical(name__value: "Ethernet999") { edges { node { id connector { node { id } } } } }
@@ -901,6 +909,32 @@ async def _scenario_isolation_state(client: InfrahubClient, branch: str) -> dict
     for collection in response.values():
         collection["edges"].sort(key=lambda edge: edge["node"]["id"])
     return response
+
+
+async def _restore_shared_fabric_fields(client: InfrahubClient, branch: str, original: dict) -> None:
+    """Restore the two agnostic fabric fields explicitly mutated by scenarios."""
+    current = await _scenario_isolation_state(client, branch)
+    actual = {edge["node"]["id"]: edge["node"] for edge in current["NetworkFabric"]["edges"]}
+    for edge in original["NetworkFabric"]["edges"]:
+        node = edge["node"]
+        updates = {key: node[key] for key in ("anta_enabled", "dci_pool") if actual[node["id"]][key] != node[key]}
+        if not updates:
+            continue
+        if "dci_pool" in updates:
+            peer = updates["dci_pool"]["node"]
+            updates["dci_pool"] = {"id": peer["id"]} if peer else None
+        await client.execute_graphql(
+            query="""mutation($data: NetworkFabricUpsertInput!) {
+              NetworkFabricUpsert(data: $data) { ok }
+            }""",
+            variables={"data": {"id": node["id"], **updates}},
+            branch_name=branch,
+        )
+    initial_pool_ids = {edge["node"]["id"] for edge in original["CoreIPPrefixPool"]["edges"]}
+    for edge in current["CoreIPPrefixPool"]["edges"]:
+        pool = edge["node"]
+        if pool["id"] not in initial_pool_ids and pool["name"]["value"] == DCI_POOL_NAME:
+            await client.delete(kind="CoreIPPrefixPool", id=pool["id"], branch=branch)
 
 
 async def _assert_pure_layer2_configs(client: InfrahubClient, branch: str, roles: dict[str, list[str]]) -> None:
@@ -1312,7 +1346,7 @@ async def _server_cabling_report(client: InfrahubClient, branch: str, server_nam
     leaf_port_channels = []
     for edge in resp["InterfaceLag"]["edges"]:
         node = edge["node"]
-        if node["name"]["value"] != "Port-Channel1117":
+        if node["name"]["value"] != "Port-Channel1":
             continue
         device_name = node.get("device", {}).get("node", {}).get("name", {}).get("value")
         if device_name in {"leaf-pod-b2-1-1", "leaf-pod-b2-1-2"}:
@@ -1444,7 +1478,7 @@ async def _hostvar_snapshot(
         storage_id = (hostvar_file.get("storage_id") or {}).get("value")
         if not storage_id:
             continue
-        content = json.loads(await storage_content(client, storage_id)) if contents else None
+        content = json.loads(await storage_content(client, storage_id, file_branch=branch)) if contents else None
         files.append(
             {
                 "device": node["name"]["value"],
@@ -1548,6 +1582,7 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
     structured_config_ethernet_ip_refs = (
         await _structured_config_ethernet_ip_refs(
             client,
+            branch,
             resp["AvdStructuredConfigFile"]["edges"],
         )
         if contents
@@ -1661,14 +1696,14 @@ def _normalize_structured_config_files(edges: list[dict]) -> list[dict]:
     return sorted(files, key=itemgetter("artifact", "file_name"))
 
 
-async def _structured_config_ethernet_ip_refs(client: InfrahubClient, edges: list[dict]) -> list[dict]:
+async def _structured_config_ethernet_ip_refs(client: InfrahubClient, branch: str, edges: list[dict]) -> list[dict]:
     refs = []
     for edge in edges:
         node = edge["node"]
         storage_id = (node.get("storage_id") or {}).get("value")
         if not storage_id:
             continue
-        content = await storage_content(client, storage_id)
+        content = await storage_content(client, storage_id, file_branch=branch)
         structured_config = json.loads(content)
         artifact = (node.get("artifact") or {}).get("node") or {}
         for interface in structured_config.get("ethernet_interfaces", []):
@@ -1907,7 +1942,7 @@ async def _dci_hostvars_report(client: InfrahubClient, branch: str, device_names
         )
         if not storage_id:
             continue
-        hostvars[node["name"]["value"]] = json.loads(await storage_content(client, storage_id))
+        hostvars[node["name"]["value"]] = json.loads(await storage_content(client, storage_id, file_branch=branch))
 
     matching_links = []
     for device_hostvars in hostvars.values():

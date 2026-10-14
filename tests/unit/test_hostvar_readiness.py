@@ -1,5 +1,7 @@
 """Readiness must cover every device before triggering structured configuration."""
 
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -77,3 +79,65 @@ async def test_permanent_read_error_is_not_hidden_as_pending() -> None:
     client = Mock(execute_graphql=AsyncMock(side_effect=GraphQLError(errors=[{"message": "cardinality"}])))
     with pytest.raises(GraphQLError, match="cardinality"):
         await hostvars.check_fabric_hostvars_ready(client, "fabric")
+
+
+@pytest.mark.parametrize("stored", ["same", "changed", "missing"])
+@pytest.mark.asyncio
+async def test_hostvar_file_marks_pending_only_when_it_will_change(
+    monkeypatch: pytest.MonkeyPatch, stored: str
+) -> None:
+    content = {"hostname": "leaf-1"}
+    events = []
+
+    async def pending(client: object, fabric: str, ready: bool) -> None:
+        assert fabric == "fabric" and ready is False
+        events.append("pending")
+
+    async def saved(**kwargs: object) -> None:
+        assert kwargs == {"allow_upsert": True, "update_group_context": False}
+        events.append("saved")
+
+    file = Mock(save=AsyncMock(side_effect=saved))
+    file.download_file = AsyncMock(
+        return_value=json.dumps(content if stored == "same" else {"hostname": "old"}, indent=2).encode()
+    )
+    artifact = SimpleNamespace(
+        save=AsyncMock(),
+        hostvar_file=SimpleNamespace(id="file" if stored != "missing" else None, peer=file, fetch=AsyncMock()),
+    )
+    generator = hostvars.GenerateAVDDeviceHostvar.__new__(hostvars.GenerateAVDDeviceHostvar)
+    generator.logger = Mock()
+    generator.client = Mock(create=AsyncMock(side_effect=[artifact, file]), get=AsyncMock(return_value=artifact))
+    flag = AsyncMock(side_effect=pending)
+    ready = AsyncMock(return_value=True)
+    monkeypatch.setattr(hostvars, "set_fabric_avd_hostvars_ready", flag)
+    monkeypatch.setattr(hostvars, "check_fabric_hostvars_ready", ready)
+    await generator._store_hostvars(fabric_id="fabric", device_id="device", hostname="leaf-1", hostvars=content)
+    ready.assert_awaited_once_with(generator.client, "fabric")
+    if stored == "same":
+        assert events == []
+        flag.assert_not_awaited()
+        file.upload_from_bytes.assert_not_called()
+        file.save.assert_not_awaited()
+    else:
+        assert events == ["pending", "saved"]
+        file.upload_from_bytes.assert_called_once_with(
+            content=json.dumps(content, indent=2).encode(), name="leaf-1-hostvars.json"
+        )
+
+
+@pytest.mark.asyncio
+async def test_failed_hostvar_write_does_not_mark_the_fabric_ready(monkeypatch: pytest.MonkeyPatch) -> None:
+    file = Mock(save=AsyncMock(side_effect=RuntimeError("storage failed")))
+    artifact = SimpleNamespace(save=AsyncMock(), hostvar_file=SimpleNamespace(id=None))
+    generator = hostvars.GenerateAVDDeviceHostvar.__new__(hostvars.GenerateAVDDeviceHostvar)
+    generator.logger = Mock()
+    generator.client = Mock(create=AsyncMock(side_effect=[artifact, file]), get=AsyncMock(return_value=artifact))
+    flag = AsyncMock()
+    ready = AsyncMock()
+    monkeypatch.setattr(hostvars, "set_fabric_avd_hostvars_ready", flag)
+    monkeypatch.setattr(hostvars, "check_fabric_hostvars_ready", ready)
+    with pytest.raises(RuntimeError, match="storage failed"):
+        await generator._store_hostvars(fabric_id="fabric", device_id="device", hostname="leaf-1", hostvars={})
+    flag.assert_awaited_once_with(generator.client, "fabric", False)
+    ready.assert_not_awaited()

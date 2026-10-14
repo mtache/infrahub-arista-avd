@@ -124,14 +124,14 @@ async def test_task_metadata_pages_do_not_truncate_or_request_task_counts() -> N
 
 
 @pytest.mark.asyncio
-async def test_fabric_kickoffs_preserve_every_target_and_wait_for_each_cascade(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_fabric_kickoffs_preserve_every_target_with_at_most_two_cascades(monkeypatch: pytest.MonkeyPatch) -> None:
     from tests.integration import test_e2e_pipeline as pipeline
 
     client = Mock()
     client.get = AsyncMock(return_value=Mock(id="generator"))
     client.all = AsyncMock(
         return_value=[
-            SimpleNamespace(id=identifier, name=SimpleNamespace(value=identifier)) for identifier in ["B", "A"]
+            SimpleNamespace(id=identifier, name=SimpleNamespace(value=identifier)) for identifier in ["C", "B", "A"]
         ]
     )
     events = []
@@ -151,7 +151,7 @@ async def test_fabric_kickoffs_preserve_every_target_and_wait_for_each_cascade(m
     monkeypatch.setattr(pipeline, "expected_super_spine_count", AsyncMock(return_value=1))
     monkeypatch.setattr(pipeline, "wait_until", AsyncMock(return_value=[Mock()]))
     await pipeline.TestE2EPipeline()._prepare_fabric(client)
-    assert events == [("run", ["A"]), ("settled", None), ("run", ["B"]), ("settled", None)]
+    assert events == [("run", ["A", "B"]), ("settled", None), ("run", ["C"]), ("settled", None)]
 
 
 @pytest.mark.asyncio
@@ -314,6 +314,50 @@ async def test_storage_cache_deduplicates_and_limits_concurrency() -> None:
     assert peak == 2
     assert await storage_content(client, "same") == "same"
     assert client.object_store.get.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_file_content_uses_the_branch_aware_file_download_endpoint() -> None:
+    client = Mock(address="http://test")
+    client._get = AsyncMock(
+        return_value=httpx.Response(200, text='{"hostvars": true}', request=httpx.Request("GET", "http://test"))
+    )
+    client.object_store.get = AsyncMock()
+    assert await storage_content(client, "file-storage", file_branch="rack-rerun") == '{"hostvars": true}'
+    client._get.assert_awaited_once_with("http://test/api/storage/files/by-storage-id/file-storage?branch=rack-rerun")
+    client.object_store.get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scenario_cleanup_restores_only_known_shared_fields_and_its_new_dci_pool() -> None:
+    from tests.integration.test_e2e_pipeline import DCI_POOL_NAME, _restore_shared_fabric_fields
+
+    original = {
+        "NetworkFabric": {
+            "edges": [{"node": {"id": "fabric", "anta_enabled": {"value": True}, "dci_pool": {"node": None}}}]
+        },
+        "CoreIPPrefixPool": {"edges": [{"node": {"id": "existing", "name": {"value": "existing"}}}]},
+    }
+    current = {
+        "NetworkFabric": {
+            "edges": [{"node": {"id": "fabric", "anta_enabled": {"value": False}, "dci_pool": {"node": {"id": "new"}}}}]
+        },
+        "CoreIPPrefixPool": {
+            "edges": original["CoreIPPrefixPool"]["edges"]
+            + [
+                {"node": {"id": "new", "name": {"value": DCI_POOL_NAME}}},
+                {"node": {"id": "unrelated", "name": {"value": "unrelated"}}},
+            ]
+        },
+    }
+    client = Mock()
+    client.execute_graphql = AsyncMock(side_effect=[current, {"NetworkFabricUpsert": {"ok": True}}])
+    client.delete = AsyncMock()
+    await _restore_shared_fabric_fields(client, "main", original)
+    assert client.execute_graphql.await_args.kwargs["variables"] == {
+        "data": {"id": "fabric", "anta_enabled": {"value": True}, "dci_pool": None}
+    }
+    client.delete.assert_awaited_once_with(kind="CoreIPPrefixPool", id="new", branch="main")
 
 
 def test_failed_container_startup_still_preserves_logs_and_tears_down(tmp_path: Path) -> None:
