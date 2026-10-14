@@ -1,10 +1,11 @@
-"""Schema-contract integration test for device design entities.
+"""Schema contracts for BGP ASNs and device designs on one isolated stack.
 
 Boots a real Infrahub via ``infrahub-testcontainers``, loads this repo's schemas
-once, and asserts the device-design contract by schema introspection:
+once, and asserts both contracts without seeds, repositories or triggers:
 
-- the schema loads with zero errors (SC-001) and the ``NetworkDeviceDesign``
-  generic carries ``role`` (super_spine/spine/leaf/l2leaf), ``device_quantity``,
+- ``RoutingAsn.asn`` is unique, with matching device and MLAG relationships;
+- the ``NetworkDeviceDesign`` generic carries ``role``
+  (super_spine/spine/leaf/l2leaf), ``device_quantity``,
   and ``device_template`` -> ``CoreObjectTemplate`` (one, ``no-action`` so a
   shared template survives a design deletion) (SC-002);
 - each tier's concrete design node inherits the generic, is keyed
@@ -14,9 +15,9 @@ once, and asserts the device-design contract by schema introspection:
 - the legacy paired sizing fields are gone, so ``device_designs`` is the only
   source of device sizing with no stale fallback (SC-006).
 
-All tiers share one class — and therefore one Infrahub stack and one schema
-load — because ``infrahub_app`` is class-scoped: a class per tier would boot a
-container stack per tier and blow the PR integration-test budget.
+All nine cases share one class-scoped stack, client, event loop and schema load.
+Each case can also be selected independently. The uniqueness case deletes its
+own ASN before leaving the shared schema-only state.
 """
 
 from __future__ import annotations
@@ -25,6 +26,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 import pytest_asyncio
+from infrahub_sdk.exceptions import GraphQLError
 
 from .stack import IntegrationStack
 
@@ -48,14 +50,59 @@ LEGACY_FIELDS = {
 }
 
 
-class TestDeviceDesignSchema(IntegrationStack):
-    @pytest_asyncio.fixture(scope="class", loop_scope="class", autouse=True)
-    async def _schema_loaded(self, client: InfrahubClient, default_branch: str, schemas: list[dict]) -> None:
-        """Load the repo schemas once for this isolated stack."""
-        await client.schema.wait_until_converged(branch=default_branch)
-        resp = await client.schema.load(schemas=schemas, branch=default_branch, wait_until_converged=True)
-        assert resp.errors == {}, f"schema load errors: {resp.errors}"  # SC-001
-        await client.schema.wait_until_converged(branch=default_branch)
+@pytest_asyncio.fixture(scope="class", loop_scope="class")
+async def schema_contracts_ready(client: InfrahubClient, default_branch: str, schemas: list[dict]) -> None:
+    """Load and converge the schema once, including for a single selected case."""
+    await client.schema.wait_until_converged(branch=default_branch)
+    resp = await client.schema.load(schemas=schemas, branch=default_branch, wait_until_converged=True)
+    assert resp.errors == {}, f"schema load errors: {resp.errors}"  # SC-001
+    await client.schema.wait_until_converged(branch=default_branch)
+
+
+@pytest.mark.asyncio(loop_scope="class")
+@pytest.mark.usefixtures("schema_contracts_ready")
+class TestSchemaContracts(IntegrationStack):
+    async def test_schema_loads_and_wires_routing_asn(self, default_branch: str, client: InfrahubClient) -> None:
+        """Schema loads clean (SC-001); RoutingAsn exists and is wired to devices/MLAG (SC-002, SC-005)."""
+        # SC-002: the node exists and its AS number is globally unique.
+        asn_schema = await client.schema.get(kind="RoutingAsn", branch=default_branch)
+        asn_attr = next((a for a in asn_schema.attributes if a.name == "asn"), None)
+        assert asn_attr is not None, "RoutingAsn is missing the 'asn' attribute"
+        assert asn_attr.unique is True, "RoutingAsn.asn must be globally unique"
+
+        # SC-005: inverses on the ASN node, with the identifiers that pair them to the peers.
+        rels = {r.name: r for r in asn_schema.relationships}
+        assert rels["fabric"].cardinality == "one"
+        assert rels["devices"].cardinality == "many"
+        assert rels["devices"].identifier == "device__asn"
+        assert rels["mlag_domains"].cardinality == "many"
+        assert rels["mlag_domains"].identifier == "mlag_domain__asn"
+
+        # forward "one" side on each peer, sharing the identifier (bidirectional edge).
+        device_schema = await client.schema.get(kind="DcimDevice", branch=default_branch)
+        dev_asn = next((r for r in device_schema.relationships if r.name == "asn"), None)
+        assert dev_asn is not None, "DcimDevice is missing the 'asn' relationship"
+        assert dev_asn.peer == "RoutingAsn"
+        assert dev_asn.cardinality == "one"
+        assert dev_asn.identifier == "device__asn"
+
+        mlag_schema = await client.schema.get(kind="MlagDomain", branch=default_branch)
+        mlag_asn = next((r for r in mlag_schema.relationships if r.name == "asn"), None)
+        assert mlag_asn is not None, "MlagDomain is missing the 'asn' relationship"
+        assert mlag_asn.peer == "RoutingAsn"
+        assert mlag_asn.cardinality == "one"
+        assert mlag_asn.identifier == "mlag_domain__asn"
+
+    async def test_asn_is_globally_unique(self, default_branch: str, client: InfrahubClient) -> None:
+        """A second RoutingAsn with the same AS number is rejected — no cross-fabric reuse (SC-004)."""
+        first = await client.create(kind="RoutingAsn", asn=64599, branch=default_branch)
+        await first.save()
+        try:
+            duplicate = await client.create(kind="RoutingAsn", asn=64599, branch=default_branch)
+            with pytest.raises(GraphQLError):
+                await duplicate.save()
+        finally:
+            await first.delete()
 
     async def test_generic_shape(self, default_branch: str, client: InfrahubClient) -> None:
         """The NetworkDeviceDesign generic carries role, device_quantity, and device_template (SC-002)."""

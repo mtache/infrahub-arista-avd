@@ -17,6 +17,34 @@ from tests.integration.helpers import read_with_retry, storage_content, wait_unt
 from tests.integration.test_seed_selection import _branch_agnostic_seed_kinds
 
 
+@pytest.mark.parametrize("outcome", ["rejected", "accepted", "unexpected-error"])
+@pytest.mark.asyncio
+async def test_schema_asn_uniqueness_cleans_its_first_node_on_every_outcome(outcome: str) -> None:
+    from tests.integration.test_schema_contracts import TestSchemaContracts
+
+    first = Mock(save=AsyncMock(), delete=AsyncMock())
+    duplicate = Mock(save=AsyncMock(), delete=AsyncMock())
+    client = Mock(create=AsyncMock(side_effect=[first, duplicate]))
+    if outcome == "rejected":
+        duplicate.save.side_effect = GraphQLError(errors=[{"message": "ASN must be unique"}])
+        await TestSchemaContracts().test_asn_is_globally_unique("main", client)
+    elif outcome == "accepted":
+        with pytest.raises(pytest.fail.Exception, match="DID NOT RAISE"):
+            await TestSchemaContracts().test_asn_is_globally_unique("main", client)
+    else:
+        duplicate.save.side_effect = RuntimeError("unexpected save error")
+        with pytest.raises(RuntimeError, match="unexpected save error"):
+            await TestSchemaContracts().test_asn_is_globally_unique("main", client)
+
+    first.save.assert_awaited_once()
+    first.delete.assert_awaited_once()
+    duplicate.delete.assert_not_awaited()
+    assert client.create.await_count == 2
+    assert all(
+        call.kwargs == {"kind": "RoutingAsn", "asn": 64599, "branch": "main"} for call in client.create.await_args_list
+    )
+
+
 @pytest.mark.asyncio
 async def test_targeted_artifact_generation_uses_artifact_ids_and_keeps_every_device() -> None:
     from tests.integration.test_e2e_pipeline import _artifact_ids_for_targets
