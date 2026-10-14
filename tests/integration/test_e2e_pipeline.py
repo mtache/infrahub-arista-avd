@@ -1814,17 +1814,17 @@ async def _wait_for_tasks(client: InfrahubClient, branch: str, before: set[str])
 
 
 async def _pipeline_tasks(client: InfrahubClient, branch: str) -> list:
-    """Include nested generator runs whose Prefect metadata omits the branch.
+    """Include generator/artifact runs whose Prefect metadata omits the branch.
 
     This client belongs to one isolated stack. Checkpoint both collections before
     each mutation so earlier generator runs cannot be mistaken for its cascade.
     """
-    branch_tasks, generator_tasks = await asyncio.gather(
+    branch_tasks, background_tasks = await asyncio.gather(
         _task_pages(client, TaskFilter(branch=branch)),
-        _task_pages(client, TaskFilter(workflow=["generator-run"])),
+        _task_pages(client, TaskFilter(workflow=["generator-run", "artifact-generate"])),
     )
     tasks = {task.id: task for task in branch_tasks}
-    tasks.update({task.id: task for task in generator_tasks if task.branch is None})
+    tasks.update({task.id: task for task in background_tasks if task.branch is None})
     return list(tasks.values())
 
 

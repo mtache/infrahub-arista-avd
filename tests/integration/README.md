@@ -16,8 +16,9 @@ fabric scenario (skipped without `--fabric`). The performance target is less tha
 Each E2E node ID selects its prerequisites through lazy fixtures; preceding test
 methods no longer need to be selected. Only the fabric generator initiates the
 baseline. Pod, rack, structured configuration and backfill generation still run
-through the real triggers. Graph mutations fork the settled baseline and verify
-that their source state remains unchanged.
+through the real triggers. Fabric kickoffs wait for their cascades sequentially
+to avoid overloading the CI-sized API. Graph mutations fork the settled baseline
+and verify that their source state remains unchanged.
 
 ```bash
 uv run --no-sync pytest \
@@ -41,8 +42,9 @@ without touching built-in objects. Branch-aware nodes remain isolated throughout
 
 Idempotence still executes two passes for all racks, including `DC1_BORDER`, and
 two hostvar passes. Generator requests contain the complete target set. Readiness
-observes new task IDs and their cascades. Snapshot polling reads metadata; once
-settled, comparisons read actual storage contents, checksums and IP assignments.
+observes new task IDs and their cascades, including generator/artifact tasks
+without branch metadata. Snapshot polling reads metadata; once settled,
+comparisons read actual storage contents, checksums and IP assignments.
 Storage downloads are cached per client and storage ID with at most two concurrent
 reads. Transient reads have bounded retries and respect `Retry-After`; permanent
 GraphQL errors and failed tasks stop the test immediately. Mutations are never

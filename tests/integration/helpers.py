@@ -220,7 +220,9 @@ async def device_design_mismatches(client: InfrahubClient, branch: str) -> list[
     design role the number of devices produced must equal ``device_quantity``.
     The design ``role`` names a tier, which the generators map onto a device role
     using the fabric's underlay (non-L3LS example fabrics use l2spine / l3spine /
-    p / pe / l2leaf), so the same mapping is applied here.
+    p / pe / l2leaf), so the same mapping is applied here. The routed leaf tier
+    includes ``border_leaf``: seed intent specializes that role without changing
+    the rack design's sizing (both roles map to AVD ``l3leaf``).
 
     The fabric tier is covered separately by ``expected_super_spine_count``.
 
@@ -292,11 +294,12 @@ async def device_design_mismatches(client: InfrahubClient, branch: str) -> list[
             want = int(design.device_quantity.value)
             mapped = device_role(role, underlays.get(parent.id))
             actual = actual_counts[parent.id]
-            got = actual.get(mapped, 0)
+            roles = ("leaf", "border_leaf") if role == "leaf" and mapped == "leaf" else (mapped,)
+            got = sum(actual.get(device_role, 0) for device_role in roles)
             if got != want:
                 mismatches.append(
                     f"{container_kind} {names[parent.id]} design_role={role} -> "
-                    f"device_role={mapped}: design={want} actual={got}; roles={dict(actual)}"
+                    f"device_roles={roles}: design={want} actual={got}; roles={dict(actual)}"
                 )
     return mismatches
 

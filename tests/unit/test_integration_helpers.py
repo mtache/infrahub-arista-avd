@@ -97,6 +97,17 @@ async def test_nested_generator_without_branch_is_part_of_the_new_execution() ->
 
 
 @pytest.mark.asyncio
+async def test_artifact_tasks_without_branch_are_also_observed() -> None:
+    from tests.integration.test_e2e_pipeline import _execution_tasks
+
+    artifact = Mock(id="artifact", branch=None, state="RUNNING")
+    client = Mock()
+    client.task.filter = AsyncMock(side_effect=[[], [artifact]])
+    assert await _execution_tasks(client, "scenario", set()) == [artifact]
+    assert client.task.filter.await_args_list[1].args[0].workflow == ["generator-run", "artifact-generate"]
+
+
+@pytest.mark.asyncio
 async def test_task_metadata_pages_do_not_truncate_or_request_task_counts() -> None:
     from infrahub_sdk.task import TaskFilter
 
@@ -165,8 +176,21 @@ async def test_inner_read_deadline_reports_its_actual_budget(monkeypatch: pytest
         await wait_until(blocked, bool, timeout=1, interval=1, describe="longer poll")
 
 
+@pytest.mark.parametrize(
+    ("underlay", "role", "quantity", "matches"),
+    [
+        ("ebgp", "leaf", 201, True),
+        ("ebgp", "border_leaf", 201, True),
+        ("ebgp", "border_leaf", 200, False),
+        ("ebgp", "border_leaf", 202, False),
+        ("none", "border_leaf", 201, False),
+        ("none", "l2leaf", 201, True),
+    ],
+)
 @pytest.mark.asyncio
-async def test_grouped_design_parity_paginates_without_per_node_reads() -> None:
+async def test_grouped_design_parity_paginates_without_per_node_reads(
+    underlay: str, role: str, quantity: int, matches: bool
+) -> None:
     from tests.integration.helpers import device_design_mismatches
 
     def collection(nodes: list[dict], count: int | None = None) -> dict:
@@ -176,7 +200,7 @@ async def test_grouped_design_parity_paginates_without_per_node_reads() -> None:
         first = offset == 0
         return {
             "NetworkFabric": collection(
-                [{"id": "fabric", "underlay_routing_protocol": {"value": "ebgp"}}] if first else []
+                [{"id": "fabric", "underlay_routing_protocol": {"value": underlay}}] if first else []
             ),
             "NetworkPod": collection(
                 [
@@ -194,7 +218,7 @@ async def test_grouped_design_parity_paginates_without_per_node_reads() -> None:
             ),
             "NetworkPodDeviceDesign": collection([]),
             "NetworkRackDeviceDesign": collection(
-                [{"role": {"value": "leaf"}, "device_quantity": {"value": 201}, "rack": {"node": {"id": "rack"}}}]
+                [{"role": {"value": "leaf"}, "device_quantity": {"value": quantity}, "rack": {"node": {"id": "rack"}}}]
                 if first
                 else []
             ),
@@ -202,7 +226,7 @@ async def test_grouped_design_parity_paginates_without_per_node_reads() -> None:
                 [
                     {
                         "id": str(index),
-                        "role": {"value": "leaf"},
+                        "role": {"value": role},
                         "rack": {"node": {"id": "rack"}},
                         "pod": {"node": {"id": "pod"}},
                     }
@@ -214,7 +238,11 @@ async def test_grouped_design_parity_paginates_without_per_node_reads() -> None:
 
     client = Mock()
     client.execute_graphql = AsyncMock(side_effect=[page(0), page(200)])
-    assert await device_design_mismatches(client, "baseline") == []
+    mismatches = await device_design_mismatches(client, "baseline")
+    assert (mismatches == []) is matches
+    if not matches:
+        assert f"design={quantity}" in mismatches[0]
+        assert role in mismatches[0]
     assert [call.kwargs["variables"]["offset"] for call in client.execute_graphql.await_args_list] == [0, 200]
     client.get.assert_not_called()
 
