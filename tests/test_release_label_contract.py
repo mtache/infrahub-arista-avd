@@ -73,6 +73,14 @@ def test_release_label_contract() -> None:
         assert rejected.returncode != 0
         assert "exactly one" in rejected.stderr
 
+    for labels in (["ci/skip-changelog"], ["ci/skip-changelog", "changes/patch"]):
+        skipped = run_checker(labels)
+        assert skipped.returncode == 0, (labels, skipped.stderr)
+
+    conflicting_with_skip = run_checker(["ci/skip-changelog", "changes/patch", "changes/minor"])
+    assert conflicting_with_skip.returncode != 0
+    assert "exactly one" in conflicting_with_skip.stderr
+
     spoofed_release_pr = run_checker([], title="chore(release): v1.2.3", head_ref="release/v1.2.3")
     assert spoofed_release_pr.returncode != 0
     assert "exactly one" in spoofed_release_pr.stderr
@@ -158,11 +166,11 @@ def test_gate_never_runs_pull_request_code() -> None:
 
 
 def test_bot_pull_requests_carry_a_bump_label() -> None:
-    """Every workflow that opens a non-release PR must label it, or the gate blocks it."""
+    """Every workflow that opens a non-release PR must label it so the gate accepts it."""
     for workflow in ("update-infrahub.yml", "update-infrahub-sdk.yml"):
         content = (WORKFLOWS_PATH / workflow).read_text()
         assert "gh pr create" in content
-        assert '--label "changes/patch"' in content, workflow
+        assert '--label "changes/patch"' in content or '--label "ci/skip-changelog"' in content, workflow
 
 
 def test_exemption_matches_the_release_pr_generator() -> None:
