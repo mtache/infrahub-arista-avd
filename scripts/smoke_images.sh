@@ -5,8 +5,11 @@ set -euo pipefail
 infrahub_image=${1:?Pass the candidate Infrahub image}
 catalog_image=${2:?Pass the candidate service-portal image}
 semaphore_image=${3:?Pass the candidate Semaphore image}
-base_image=${4:-registry.opsmill.io/opsmill/infrahub:1.11.5}
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# The reference image is the one the Dockerfile extends, so a version bump that
+# edits the Dockerfile ARG moves both sides of the comparison together.
+base_version=$(sed -n 's/^ARG INFRAHUB_BASE_VERSION=//p' "$repo_root/Dockerfile")
+base_image=${4:-registry.opsmill.io/opsmill/infrahub:${base_version:?No ARG INFRAHUB_BASE_VERSION default in Dockerfile}}
 catalog_container=
 trap 'if [[ -n "$catalog_container" ]]; then docker rm -f "$catalog_container" >/dev/null; fi' EXIT
 
