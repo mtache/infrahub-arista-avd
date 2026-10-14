@@ -273,7 +273,7 @@ async def _connect_uplink(
             return
 
         network_link = attached_link
-        await _ensure_generated_uplink_role(client, network_link)
+        await _ensure_generated_uplink_role(network_link)
         logger.info("Reconciled generated uplink %s", link_spec.name)
 
     if network_link is None:
@@ -294,15 +294,9 @@ async def _connect_uplink(
         logger.info("Preserved existing connector state for %s", link_spec.name)
 
 
-async def _ensure_generated_uplink_role(client: InfrahubClient, network_link: NetworkLink) -> None:
-    if _node_attribute_value(network_link, "role") == "uplink":
-        # Retain the same ownership as an upsert without emitting another
-        # attribute mutation for an already reconciled link. Endpoint ports
-        # remain owned by their device/template generator.
-        await client.group_context.add_related_nodes(ids=[network_link.id])
-        return
+async def _ensure_generated_uplink_role(network_link: object) -> None:
     _set_node_attribute_value(network_link, "role", "uplink")
-    await network_link.save(allow_upsert=True)
+    await network_link.save(allow_upsert=True)  # type: ignore[attr-defined]
 
 
 def _node_attribute_value(node: object, attribute_name: str) -> str | None:

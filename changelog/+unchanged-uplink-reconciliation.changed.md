@@ -1,1 +1,0 @@
-Retain unchanged generated uplinks in their target's tracking group without rewriting their role; missing roles and endpoint connectors still reconcile normally and physical port ownership remains unchanged.
