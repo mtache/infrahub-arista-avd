@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
 from netutils.interface import sort_interface_list
@@ -50,13 +51,15 @@ def create_reverse_sorted_device_interface_map(
 def _sort_devices(interface_map: dict[DcimDevice, list[DcimInterface]]) -> dict[DcimDevice, list[DcimInterface]]:
     """Keep cabling independent of GraphQL edge order and partial index hydration."""
 
-    def index(device: DcimDevice) -> int | None:
+    def index(device: DcimDevice) -> Decimal | None:
         value = getattr(getattr(device, "index", None), "value", None)
-        if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-            return value
-        if isinstance(value, str) and value.isdecimal() and int(value) > 0:
-            return int(value)
-        return None
+        if isinstance(value, bool) or not isinstance(value, int | float | str | Decimal):
+            return None
+        try:
+            number = Decimal(str(value))
+        except InvalidOperation:
+            return None
+        return number if number.is_finite() else None
 
     def name_key(device: DcimDevice) -> tuple:
         name = getattr(getattr(device, "name", None), "value", None) or device.display_label

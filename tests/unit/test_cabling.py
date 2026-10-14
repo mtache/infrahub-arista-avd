@@ -408,8 +408,20 @@ def test_parallel_uplink_suffixes_are_stable_and_naturally_ordered() -> None:
 
 
 @pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("indexes", [(2, 1), (None, None), (2, None)])
-def test_device_interface_sorting_ignores_response_order(reverse: bool, indexes: tuple[int | None, int | None]) -> None:
+@pytest.mark.parametrize(
+    ("indexes", "names"),
+    [
+        ((2, 1), ["leaf-2", "leaf-10"]),
+        ((None, None), ["leaf-2", "leaf-10"]),
+        ((2, None), ["leaf-2", "leaf-10"]),
+        ((0, 1), ["leaf-10", "leaf-2"]),
+        ((1.5, "2.5"), ["leaf-10", "leaf-2"]),
+        (("NaN", 1), ["leaf-2", "leaf-10"]),
+    ],
+)
+def test_device_interface_sorting_ignores_response_order(
+    reverse: bool, indexes: tuple[object, object], names: list[str]
+) -> None:
     from solution_arista_avd.sorting import (
         create_reverse_sorted_device_interface_map,
         create_sorted_device_interface_map,
@@ -432,7 +444,7 @@ def test_device_interface_sorting_ignores_response_order(reverse: bool, indexes:
     first = sort(interfaces)
     second = sort(list(reversed(interfaces)))
     assert first == second
-    assert [device.name.value for device in first] == ["leaf-2", "leaf-10"]
+    assert [device.name.value for device in first] == names
     assert [interface.name.value for interface in next(iter(first.values()))] == (
         ["Ethernet10", "Ethernet2"] if reverse else ["Ethernet2", "Ethernet10"]
     )
