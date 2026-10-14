@@ -50,8 +50,8 @@ from solution_arista_avd.protocols import (  # noqa: E402
 )
 
 from .asn import set_device_asn  # noqa: E402
+from .hostvar_readiness import fabric_devices_with_hostvars  # noqa: E402
 from .rack_generator_query import RackGeneratorQuery  # noqa: E402
-from .rack_hostvar_readiness_query import RackHostvarReadinessQuery  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -483,25 +483,7 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
 
     async def fabric_devices(self) -> list[Any]:
         """Return all generated devices under the current fabric."""
-        query = Path(__file__).with_name("rack_hostvar_readiness.gql").read_text()
-        devices = []
-        offset = 0
-        while True:
-            response = await self.client.execute_graphql(query=query, variables={"offset": offset, "limit": 200})
-            data = RackHostvarReadinessQuery.model_validate(response)
-            for edge in data.dcim_device.edges:
-                device = edge.node
-                if device is None or device.pod.node is None:
-                    continue
-                parent = device.pod.node.parent.node
-                if parent is not None and parent.typename__ == "NetworkFabric" and parent.id == self.fabric.id:
-                    devices.append(device)
-            offset += len(data.dcim_device.edges)
-            if offset >= data.dcim_device.count:
-                break
-            if not data.dcim_device.edges:
-                raise ValueError("Device readiness query returned an empty page before its reported count")
-        return devices
+        return await fabric_devices_with_hostvars(self.client, self.fabric.id)
 
     def device_ids(self, devices: list[Any]) -> list[str]:
         """Return de-duplicated device IDs preserving input order."""

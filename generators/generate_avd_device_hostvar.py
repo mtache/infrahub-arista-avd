@@ -63,13 +63,14 @@ from solution_arista_avd.pool_roles import (  # noqa: E402
     next_available_prefix,
     pod_required_mlag_roles,
 )
-from solution_arista_avd.protocols import AvdArtifact, AvdHostvarFile, NetworkPod  # noqa: E402
+from solution_arista_avd.protocols import AvdArtifact, AvdHostvarFile  # noqa: E402
 
 from .generate_avd_device_inputs_query import (  # noqa: E402
     GenerateAvdDeviceInputsQuery,
     GenerateAvdDeviceInputsQueryDcimDeviceEdgesNodeInterfacesEdges,
     GenerateAvdDeviceInputsQueryDcimDeviceEdgesNodeInterfacesEdgesNodeInterfacePhysical,
 )
+from .hostvar_readiness import fabric_devices_with_hostvars  # noqa: E402
 
 if TYPE_CHECKING:
     from infrahub_sdk import InfrahubClient
@@ -161,36 +162,10 @@ def get_generator_avd_type(role: str) -> str:
 
 
 async def check_fabric_hostvars_ready(client: InfrahubClient, fabric_id: str) -> bool:
-    pods = await client.filters(NetworkPod, parent__ids=[fabric_id])
-
-    devices = set()
-    for pod in pods:
-        await pod.devices.fetch()
-        await pod.racks.fetch()
-
-        devices.update(device_peer.peer for device_peer in pod.devices.peers)
-
-        for rack_peer in pod.racks.peers:
-            rack = rack_peer.peer
-            await rack.devices.fetch()
-
-            devices.update(device_peer.peer for device_peer in rack.devices.peers)
-
+    devices = await fabric_devices_with_hostvars(client, fabric_id)
     for device in devices:
-        if not device.avd_artifact.id:
-            return False
-
-        try:
-            await device.avd_artifact.fetch()
-            artifact = device.avd_artifact.peer
-
-            if not artifact.hostvar_file.id:
-                return False
-            await artifact.hostvar_file.fetch()
-            if not artifact.hostvar_file.peer:
-                return False
-        except Exception as exc:  # noqa: BLE001 - any read failure means "not ready yet"
-            logger.debug("Hostvar readiness check failed for a device: %s", exc)
+        artifact = device.avd_artifact.node
+        if artifact is None or artifact.hostvar_file.node is None:
             return False
 
     await set_fabric_avd_hostvars_ready(client, fabric_id, True)

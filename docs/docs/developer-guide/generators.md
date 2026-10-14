@@ -161,6 +161,13 @@ query PodGenerator($pod_id: String!) {
 
 **Query**: `generate_rack.gql`
 
+Hostvar readiness uses a paginated, typed read of devices and their stored
+hostvar-file references. The rack generator selects every device in the fabric
+when any file is missing during bootstrap; an existing fabric refreshes the
+rack devices and their pod spines. The hostvar generator uses the same grouped
+read before setting the fabric ready for structured configuration. Both pod
+and rack membership are included, and devices from other fabrics are excluded.
+
 ```graphql
 query RackGenerator($rack_id: String!) {
   LocationRack(ids: [$rack_id]) {

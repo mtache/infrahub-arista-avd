@@ -589,6 +589,7 @@ def _hostvar_readiness_response(missing: set[str]) -> dict:
                         "id": name,
                         "name": {"value": name},
                         "pod": {"node": {"parent": {"node": {"__typename": "NetworkFabric", "id": "fabric-1"}}}},
+                        "rack": {"node": None},
                         "avd_artifact": {
                             "node": {"hostvar_file": {"node": None if name in missing else {"id": f"file-{name}"}}}
                         },

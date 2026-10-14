@@ -22,6 +22,7 @@ class RackHostvarReadinessQueryDcimDeviceEdgesNode(BaseModel):
     id: str
     name: Optional["RackHostvarReadinessQueryDcimDeviceEdgesNodeName"]
     pod: "RackHostvarReadinessQueryDcimDeviceEdgesNodePod"
+    rack: "RackHostvarReadinessQueryDcimDeviceEdgesNodeRack"
     avd_artifact: "RackHostvarReadinessQueryDcimDeviceEdgesNodeAvdArtifact"
 
 
@@ -42,6 +43,35 @@ class RackHostvarReadinessQueryDcimDeviceEdgesNodePodNodeParent(BaseModel):
 
 
 class RackHostvarReadinessQueryDcimDeviceEdgesNodePodNodeParentNode(BaseModel):
+    typename__: Literal["NetworkBuildingBlock", "NetworkFabric", "NetworkPod"] = Field(
+        alias="__typename"
+    )
+    id: Optional[str]
+
+
+class RackHostvarReadinessQueryDcimDeviceEdgesNodeRack(BaseModel):
+    node: Optional["RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNode"]
+
+
+class RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNode(BaseModel):
+    pod: "RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePod"
+
+
+class RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePod(BaseModel):
+    node: Optional["RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePodNode"]
+
+
+class RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePodNode(BaseModel):
+    parent: "RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePodNodeParent"
+
+
+class RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePodNodeParent(BaseModel):
+    node: Optional[
+        "RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePodNodeParentNode"
+    ]
+
+
+class RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePodNodeParentNode(BaseModel):
     typename__: Literal["NetworkBuildingBlock", "NetworkFabric", "NetworkPod"] = Field(
         alias="__typename"
     )
@@ -77,6 +107,11 @@ RackHostvarReadinessQueryDcimDeviceEdgesNode.model_rebuild()
 RackHostvarReadinessQueryDcimDeviceEdgesNodePod.model_rebuild()
 RackHostvarReadinessQueryDcimDeviceEdgesNodePodNode.model_rebuild()
 RackHostvarReadinessQueryDcimDeviceEdgesNodePodNodeParent.model_rebuild()
+RackHostvarReadinessQueryDcimDeviceEdgesNodeRack.model_rebuild()
+RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNode.model_rebuild()
+RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePod.model_rebuild()
+RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePodNode.model_rebuild()
+RackHostvarReadinessQueryDcimDeviceEdgesNodeRackNodePodNodeParent.model_rebuild()
 RackHostvarReadinessQueryDcimDeviceEdgesNodeAvdArtifact.model_rebuild()
 RackHostvarReadinessQueryDcimDeviceEdgesNodeAvdArtifactNode.model_rebuild()
 RackHostvarReadinessQueryDcimDeviceEdgesNodeAvdArtifactNodeHostvarFile.model_rebuild()

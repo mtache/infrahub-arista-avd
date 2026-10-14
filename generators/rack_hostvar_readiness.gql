@@ -6,6 +6,7 @@ query RackHostvarReadinessQuery($offset: Int, $limit: Int) {
         id
         name { value }
         pod { node { parent { node { __typename id } } } }
+        rack { node { pod { node { parent { node { __typename id } } } } } }
         avd_artifact { node { hostvar_file { node { id } } } }
       }
     }
