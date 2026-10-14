@@ -47,6 +47,104 @@ def _named_peer(name: str) -> SimpleNamespace:
     return SimpleNamespace(name=_attr(name))
 
 
+@pytest.mark.asyncio
+async def test_pool_prefix_reuses_current_typed_query_and_keeps_resource_order() -> None:
+    from generators.generate_avd_device_inputs_query import (
+        GenerateAvdDeviceInputsQueryDcimDeviceEdgesNodePodNodeParentNodeNetworkFabricFabricIpPoolsEdgesNodeCoreIPPrefixPool as PoolQuery,
+    )
+
+    # Use the real generated pool model rather than a permissive SDK mock.
+    pool = PoolQuery(
+        __typename="CoreIPPrefixPool",
+        id="pool",
+        name={"value": "uplinks"},
+        resources={
+            "edges": [
+                {
+                    "node": {
+                        "__typename": "IpamPrefix",
+                        "prefix": {"value": prefix},
+                        "role": {"value": "fabric_point_to_point"},
+                    }
+                }
+                for prefix in ("10.2.0.0/16", "10.1.0.0/16")
+            ]
+        },
+    )
+    gen = _make_generator()
+    assert await gen._extract_pool_prefix(pool, "CoreIPPrefixPool") == "10.2.0.0/16"
+    pool.resources.edges[0].node.prefix.value = "10.3.0.0/16"
+    assert await gen._extract_pool_prefix(pool, "CoreIPPrefixPool") == "10.3.0.0/16"
+    gen.client.get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initialized", [False, True])
+async def test_legacy_pool_prefix_fetches_only_unhydrated_resources(initialized: bool) -> None:
+    pool = _pool()
+    resources = _rel([SimpleNamespace(prefix=_attr("10.1.0.0/16"))])
+    resources.initialized = initialized
+    gen = _make_generator()
+    gen.client.get.return_value = SimpleNamespace(resources=resources)
+    assert await gen._extract_pool_prefix(SimpleNamespace(node=pool), "CoreIPPrefixPool") == "10.1.0.0/16"
+    gen.client.get.assert_awaited_once_with(kind="CoreIPPrefixPool", id=pool.id, include=["resources"])
+    assert resources.fetch.await_count == (0 if initialized else 1)
+
+
+@pytest.mark.asyncio
+async def test_legacy_pool_prefix_uses_sdk_include_without_a_second_graphql_read() -> None:
+    client = InfrahubClient(address="http://offline.invalid", config={"username": None, "password": None})
+    schemas = {
+        "CoreIPPrefixPool": NodeSchemaAPI(
+            namespace="Core",
+            name="IPPrefixPool",
+            attributes=[AttributeSchemaAPI(name="name", kind="Text")],
+            relationships=[RelationshipSchemaAPI(name="resources", peer="IpamPrefix", cardinality="many")],
+        ),
+        "IpamPrefix": NodeSchemaAPI(
+            namespace="Ipam",
+            name="Prefix",
+            attributes=[AttributeSchemaAPI(name="prefix", kind="IPNetwork")],
+            relationships=[],
+        ),
+    }
+    client.schema.get = AsyncMock(side_effect=lambda *, kind, **_kwargs: schemas[kind])
+    client.execute_graphql = AsyncMock(
+        return_value={
+            "CoreIPPrefixPool": {
+                "count": 1,
+                "edges": [
+                    {
+                        "node": {
+                            "__typename": "CoreIPPrefixPool",
+                            "id": "pool",
+                            "name": {"value": "legacy"},
+                            "resources": {
+                                "edges": [
+                                    {
+                                        "node": {
+                                            "__typename": "IpamPrefix",
+                                            "id": "prefix",
+                                            "prefix": {"value": "10.4.0.0/16"},
+                                        }
+                                    }
+                                ]
+                            },
+                        }
+                    }
+                ],
+            }
+        }
+    )
+    gen = _make_generator()
+    gen.client = client
+    assert (
+        await gen._extract_pool_prefix(SimpleNamespace(node=SimpleNamespace(id="pool")), "CoreIPPrefixPool")
+        == "10.4.0.0/16"
+    )
+    assert client.execute_graphql.await_count == 1
+
+
 # Sentinel so tests can pass `pool=None` to model a fabric with no DCI pool,
 # distinct from "use the default pool".
 _NO_POOL = object()

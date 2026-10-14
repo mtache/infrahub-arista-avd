@@ -6,6 +6,7 @@ import logging
 import operator
 import re
 import sys
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from ipaddress import IPv4Network, IPv6Network, ip_network
@@ -1680,11 +1681,26 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         if pool_node is None:
             return None
 
-        pool = await self.client.get(kind=pool_kind, id=_field(pool_node, "id"), include=["resources"])
-        await pool.resources.fetch()
+        # Role-based pools already carry their resources in the typed generator
+        # query. Preserve the query's resource order and use the first prefix,
+        # exactly as the SDK traversal below does. Do not cache between runs.
+        for resource in _relationship_nodes(pool_node, "resources"):
+            prefix = _value(resource, "prefix") or _value(resource, "address")
+            if prefix is not None:
+                return str(prefix)
 
-        for resource_peer in pool.resources.peers:
-            resource = resource_peer.peer
+        # Legacy pool references contain only an ID. The include hydrates their
+        # resource peers; fetch again only when the SDK store is incomplete.
+        pool = await self.client.get(kind=pool_kind, id=_field(pool_node, "id"), include=["resources"])
+        resources = None
+        if getattr(pool.resources, "initialized", False) is True:
+            with suppress(NodeNotFoundError):
+                resources = [peer.peer for peer in pool.resources.peers]
+        if resources is None:
+            await pool.resources.fetch()
+            resources = [peer.peer for peer in pool.resources.peers]
+
+        for resource in resources:
             # CoreIPPrefixPool resources are IpamPrefix nodes with a prefix attribute
             if hasattr(resource, "prefix"):
                 return str(resource.prefix.value)

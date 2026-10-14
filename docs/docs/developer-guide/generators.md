@@ -213,6 +213,9 @@ query RackGenerator($rack_id: String!) {
 EVPN tenant services use one paginated, typed read per child kind (VRFs, SVIs,
 and L2 VLANs), including their parent relations and rack/AVD tags. These reads
 belong to one hostvar build, so a subsequent run observes updated service intent.
+Role-based pool prefixes are read from the typed query's resource list in its
+existing order. Legacy references containing only an ID still load the pool,
+reusing the included resource peers when the SDK has hydrated them.
 
 **Query**: `avd_device_hostvar.gql`
 
