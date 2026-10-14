@@ -1,6 +1,5 @@
 """Unit tests for the AVD ANTA catalog transform."""
 
-import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,11 +91,10 @@ def _data(
 def _transform(structured_config: dict | None = None) -> AvdAntaCatalogTransform:
     """Build a transform with a mocked client that returns the given structured config."""
     t = AvdAntaCatalogTransform.__new__(AvdAntaCatalogTransform)
-    sc_file = AsyncMock(id="scf-dev-target")
+    sc_file = AsyncMock()
     sc_file.download_file = AsyncMock(return_value=json.dumps(structured_config or {"hostname": "leaf1"}))
     client = AsyncMock()
     client.get = AsyncMock(return_value=sc_file)
-    client.filters = AsyncMock(return_value=[sc_file])
     t._init_client = client  # `client` is a read-only property backed by _init_client
     return t
 
@@ -180,75 +178,6 @@ def test_query_exposes_fabric_settings_for_proposed_change_impact_tracking() -> 
     )[0]
     assert "anta_enabled" in direct_fabric_query
     assert "avd_catalogs_filters" in direct_fabric_query
-
-
-async def test_fabric_catalog_reads_every_sibling_once_and_limits_downloads() -> None:
-    from transforms.avd_anta_catalog_query import AvdAntaCatalogQuery
-
-    transform = _transform()
-    data = _data(anta_enabled=True)
-    data["DcimDevice"]["edges"].extend(
-        {"node": _device(hostname, hostname, fabric_id=fabric_id)}
-        for hostname, fabric_id in [("leaf2", FABRIC_ID), ("spine1", FABRIC_ID), ("foreign", "other")]
-    )
-    data["DcimDevice"]["edges"].append({"node": _device("missing", "missing", with_sc=False)})
-    active = maximum = 0
-
-    async def download(hostname: str) -> str:
-        nonlocal active, maximum
-        active += 1
-        maximum = max(maximum, active)
-        await asyncio.sleep(0.001)
-        active -= 1
-        return json.dumps({"hostname": hostname})
-
-    files = [
-        SimpleNamespace(
-            id=f"scf-{identifier}", download_file=AsyncMock(side_effect=lambda hostname=hostname: download(hostname))
-        )
-        for identifier, hostname in [("dev-target", "leaf1"), ("leaf2", "leaf2"), ("spine1", "spine1")]
-    ]
-    for file, hostname in zip(files, ("leaf1", "leaf2", "spine1"), strict=True):
-
-        async def read(hostname: str = hostname) -> str:
-            return await download(hostname)
-
-        file.download_file = AsyncMock(side_effect=read)
-    transform.client.filters.return_value = files
-    configs = await transform._fabric_structured_configs(AvdAntaCatalogQuery(**data), FABRIC_ID)
-    assert set(configs) == {"leaf1", "leaf2", "spine1"}
-    assert {config["hostname"] for config in configs.values()} == set(configs)
-    assert maximum == 2
-    transform.client.filters.assert_awaited_once()
-    assert transform.client.filters.await_args.kwargs == {
-        "ids": ["scf-dev-target", "scf-leaf2", "scf-spine1"],
-        "prefetch_relationships": False,
-    }
-    transform.client.get.assert_not_awaited()
-    assert all(file.download_file.await_count == 1 for file in files)
-
-
-async def test_missing_fabric_file_fails_instead_of_rendering_incomplete_catalog() -> None:
-    transform = _transform()
-    transform.client.filters.return_value = []
-    with pytest.raises(ValueError, match="scf-dev-target"):
-        await transform.transform(_data(anta_enabled=True))
-
-
-async def test_next_catalog_execution_reads_changed_file_contents() -> None:
-    from transforms.avd_anta_catalog_query import AvdAntaCatalogQuery
-
-    transform = _transform()
-    file = transform.client.filters.return_value[0]
-    file.download_file.side_effect = [
-        json.dumps({"hostname": "leaf1", "ip_routing": enabled}) for enabled in (False, True)
-    ]
-    parsed = AvdAntaCatalogQuery(**_data(anta_enabled=True))
-    first = await transform._fabric_structured_configs(parsed, FABRIC_ID)
-    second = await transform._fabric_structured_configs(parsed, FABRIC_ID)
-    assert first["leaf1"]["ip_routing"] is False
-    assert second["leaf1"]["ip_routing"] is True
-    assert transform.client.filters.await_count == file.download_file.await_count == 2
 
 
 if __name__ == "__main__":

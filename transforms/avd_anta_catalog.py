@@ -9,7 +9,6 @@ every sibling device's structured config in the same fabric is gathered to build
 a single ``AVDFabricData`` instance.
 """
 
-import asyncio
 import json
 import sys
 from pathlib import Path
@@ -101,36 +100,25 @@ class AvdAntaCatalogTransform(InfrahubTransform):
     async def _fabric_structured_configs(
         self, parsed: AvdAntaCatalogQuery, fabric_id: str
     ) -> dict[str, dict[str, Any]]:
-        """Read the complete fabric with one metadata collection and two downloads at a time."""
-        selected_files = {}
+        """Download validated structured config for every device in the fabric."""
+        configs: dict[str, dict[str, Any]] = {}
         for edge in parsed.dcim_device.edges:
             device = edge.node
             if not device or not device.name or not device.name.value:
                 continue
             if self._device_fabric_id(device) != fabric_id:
                 continue
-            artifact = device.avd_artifact.node if device.avd_artifact else None
-            sc_node = artifact.structured_config_file.node if artifact else None
-            if sc_node:
-                selected_files[device.name.value] = sc_node.id
-        if not selected_files:
-            return {}
-        files = await self.client.filters(
-            AvdStructuredConfigFile, ids=sorted(set(selected_files.values())), prefetch_relationships=False
-        )
-        file_by_id = {file.id: file for file in files}
-        missing = set(selected_files.values()) - file_by_id.keys()
-        if missing:
-            raise ValueError(f"ANTA catalog files disappeared: {sorted(missing)}")
+            sc = await self._download_structured_config(device)
+            if sc is not None:
+                configs[device.name.value] = sc
+        return configs
 
-        # Keep contents local to this transform execution. A file node may have
-        # changed on a later generation or on another branch.
-        semaphore = asyncio.Semaphore(2)
-
-        async def download(file_id: str) -> tuple[str, dict[str, Any]]:
-            async with semaphore:
-                content = await file_by_id[file_id].download_file()
-            return file_id, validate_structured_config(json.loads(content)).validated_data
-
-        contents = dict(await asyncio.gather(*(download(file_id) for file_id in file_by_id)))
-        return {hostname: contents[file_id] for hostname, file_id in selected_files.items()}
+    async def _download_structured_config(self, device: DeviceNode) -> dict[str, Any] | None:
+        """Download and validate a device's structured config, or None if absent/invalid."""
+        artifact = device.avd_artifact.node if device.avd_artifact else None
+        sc_node = artifact.structured_config_file.node if artifact else None
+        if not sc_node:
+            return None
+        sc_file = await self.client.get(AvdStructuredConfigFile, id=sc_node.id)
+        content = await sc_file.download_file()
+        return validate_structured_config(json.loads(content)).validated_data

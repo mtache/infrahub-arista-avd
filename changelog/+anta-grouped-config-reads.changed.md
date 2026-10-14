@@ -1,1 +1,0 @@
-Read ANTA catalog structured-configuration file metadata in one typed collection per fabric and download every sibling configuration with at most two concurrent reads, preserving fabric-wide catalog inputs and failing on disappeared files.
