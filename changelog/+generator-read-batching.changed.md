@@ -1,0 +1,1 @@
+Read cabling endpoints and existing uplinks in groups, and hydrate backfill interfaces from the generator query. Preserve connector conflicts, link medium, earlier interface writes and topology ownership while reducing repeated GraphQL reads.

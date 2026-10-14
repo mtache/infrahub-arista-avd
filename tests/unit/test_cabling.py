@@ -18,6 +18,7 @@ from solution_arista_avd.cabling import (
     build_rack_cabling_plan,
     connect_interface_maps,
 )
+from solution_arista_avd.protocols import NetworkLink
 
 
 def _iface(iface_id: str) -> MagicMock:
@@ -196,7 +197,7 @@ class TestConnectInterfaceMaps:
         network_link = SimpleNamespace(id="link-1", name="leaf-1-Ethernet1__spine-1-Ethernet1", save=AsyncMock())
         client = SimpleNamespace(
             create=AsyncMock(return_value=network_link),
-            get=AsyncMock(side_effect=[src_fetched_iface, dst_fetched_iface]),
+            filters=AsyncMock(return_value=[src_fetched_iface, dst_fetched_iface]),
         )
         logger = MagicMock()
 
@@ -223,7 +224,7 @@ class TestConnectInterfaceMaps:
         network_link = SimpleNamespace(id="link-1", name="Uplink leaf-1__spine-1", save=AsyncMock())
         client = SimpleNamespace(
             create=AsyncMock(return_value=network_link),
-            get=AsyncMock(side_effect=[src_fetched_iface, dst_fetched_iface]),
+            filters=AsyncMock(return_value=[src_fetched_iface, dst_fetched_iface]),
         )
         logger = MagicMock()
 
@@ -235,7 +236,7 @@ class TestConnectInterfaceMaps:
         )
 
         client.create.assert_awaited_once_with(
-            kind="NetworkLink",
+            NetworkLink,
             name="Uplink leaf-1__spine-1",
             role="uplink",
         )
@@ -258,7 +259,7 @@ class TestConnectInterfaceMaps:
         )
         client = SimpleNamespace(
             create=AsyncMock(),
-            get=AsyncMock(side_effect=[src_fetched_iface, dst_fetched_iface, uplink]),
+            filters=AsyncMock(side_effect=[[src_fetched_iface, dst_fetched_iface], [uplink]]),
         )
         logger = MagicMock()
 
@@ -292,7 +293,7 @@ class TestConnectInterfaceMaps:
         )
         client = SimpleNamespace(
             create=AsyncMock(),
-            get=AsyncMock(side_effect=[src_fetched_iface, dst_fetched_iface, existing_link]),
+            filters=AsyncMock(side_effect=[[src_fetched_iface, dst_fetched_iface], [existing_link]]),
         )
         logger = MagicMock()
 
@@ -322,7 +323,7 @@ class TestConnectInterfaceMaps:
         manual_b = SimpleNamespace(id="manual-b", name=SimpleNamespace(value="Manual B"), save=AsyncMock())
         client = SimpleNamespace(
             create=AsyncMock(),
-            get=AsyncMock(side_effect=[src_fetched_iface, dst_fetched_iface, manual_a, manual_b]),
+            filters=AsyncMock(side_effect=[[src_fetched_iface, dst_fetched_iface], [manual_a, manual_b]]),
         )
         logger = MagicMock()
 
@@ -351,7 +352,7 @@ class TestConnectInterfaceMaps:
         )
         client = SimpleNamespace(
             create=AsyncMock(return_value=network_link),
-            get=AsyncMock(side_effect=[src_fetched_iface, dst_fetched_iface]),
+            filters=AsyncMock(return_value=[src_fetched_iface, dst_fetched_iface]),
         )
         logger = MagicMock()
 
@@ -374,7 +375,7 @@ class TestConnectInterfaceMaps:
         network_link = SimpleNamespace(id="link-1", name="leaf-1-Ethernet1__spine-1-Ethernet1", save=AsyncMock())
         client = SimpleNamespace(
             create=AsyncMock(return_value=network_link),
-            get=AsyncMock(side_effect=[src_fetched_iface, dst_fetched_iface]),
+            filters=AsyncMock(return_value=[src_fetched_iface, dst_fetched_iface]),
         )
         logger = MagicMock()
 
@@ -384,6 +385,68 @@ class TestConnectInterfaceMaps:
         assert dst_fetched_iface.connector is network_link
         src_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
         dst_fetched_iface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+
+    @pytest.mark.asyncio
+    async def test_grouped_reconciliation_preserves_medium_and_rejects_shared_port_conflict(self) -> None:
+        src_existing = _physical_interface("src-existing", "leaf-1", "Ethernet49", connector_id="existing")
+        dst_existing = _physical_interface("dst-existing", "spine-1", "Ethernet1", connector_id="existing")
+        src_new = _physical_interface("src-new", "leaf-2", "Ethernet49")
+        dst_new = _physical_interface("dst-new", "spine-1", "Ethernet2")
+        dst_conflict = _physical_interface("dst-conflict", "spine-2", "Ethernet1")
+        existing = SimpleNamespace(
+            id="existing",
+            name=SimpleNamespace(value="Uplink leaf-1__spine-1"),
+            medium=SimpleNamespace(value="copper"),
+            role=SimpleNamespace(value="uplink"),
+            save=AsyncMock(),
+        )
+        new = SimpleNamespace(id="new", name=SimpleNamespace(value="Uplink leaf-2__spine-1"), save=AsyncMock())
+        client = SimpleNamespace(
+            filters=AsyncMock(side_effect=[[dst_conflict, src_new, dst_existing, src_existing, dst_new], [existing]]),
+            create=AsyncMock(return_value=new),
+        )
+        logger = MagicMock()
+
+        await connect_interface_maps(
+            client,  # type: ignore[arg-type]
+            logger,
+            [(src_existing, dst_existing), (src_new, dst_new), (src_new, dst_conflict)],
+            link_role="uplink",
+        )
+
+        assert client.filters.await_count == 2
+        client.create.assert_awaited_once_with(NetworkLink, name="Uplink leaf-2__spine-1", role="uplink")
+        assert existing.medium.value == "copper"
+        existing.save.assert_awaited_once_with(allow_upsert=True)
+        new.save.assert_awaited_once_with(allow_upsert=True)
+        assert src_new.connector is new
+        assert dst_new.connector is new
+        src_new.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+        dst_new.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+        dst_conflict.save.assert_not_awaited()
+        src_existing.save.assert_not_awaited()
+        dst_existing.save.assert_not_awaited()
+        assert any("Preserved existing connector" in call.args[0] for call in logger.warning.call_args_list)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("missing", ["endpoint", "link"])
+    async def test_missing_cabling_peer_stops_before_any_write(self, missing: str) -> None:
+        src = _physical_interface("src", "leaf-1", "Ethernet49", connector_id="existing")
+        dst = _physical_interface("dst", "spine-1", "Ethernet1")
+        reads = [[src]] if missing == "endpoint" else [[src, dst], []]
+        client = SimpleNamespace(filters=AsyncMock(side_effect=reads), create=AsyncMock())
+
+        with pytest.raises(ValueError, match="disappeared before reconciliation"):
+            await connect_interface_maps(
+                client,  # type: ignore[arg-type]
+                MagicMock(),
+                [(src, dst)],
+                link_role="uplink",
+            )
+
+        client.create.assert_not_awaited()
+        src.save.assert_not_awaited()
+        dst.save.assert_not_awaited()
 
 
 def test_parallel_uplink_suffixes_are_stable_and_naturally_ordered() -> None:

@@ -10,19 +10,16 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
-from typing import Any
+from typing import Any, cast
 
 from infrahub_sdk.exceptions import NodeNotFoundError
 from infrahub_sdk.generator import InfrahubGenerator
-from infrahub_sdk.node import NodeProperty
+from infrahub_sdk.node import InfrahubNode, NodeProperty
 
 from solution_arista_avd.protocols import (
     AvdStructuredConfigFile,
     CoreAccountGroup,
     DcimInterface,
-    InterfaceLag,
-    InterfacePhysical,
-    InterfaceVirtual,
     IpamIPAddress,
     IpamPrefix,
     RoutingBGPNeighbor,
@@ -38,12 +35,6 @@ from .backfill_structured_config_query import (
     BackfillStructuredConfigQuery,
     BackfillStructuredConfigQueryAvdArtifactEdgesNodeDeviceNodeInterfacesEdgesNode,
 )
-
-INTERFACE_KIND_MAP: dict[str, type] = {
-    "InterfacePhysical": InterfacePhysical,
-    "InterfaceVirtual": InterfaceVirtual,
-    "InterfaceLag": InterfaceLag,
-}
 
 INTERFACE_SECTIONS = ["ethernet_interfaces", "loopback_interfaces", "management_interfaces"]
 GENERATED_LOOPBACK_INTERFACES = {"Loopback0", "Loopback1"}
@@ -110,6 +101,21 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
             if iface.name and iface.name.value:
                 result[iface.name.value] = iface
         return result
+
+    async def _interface_from_query(
+        self, interface_node: BackfillStructuredConfigQueryAvdArtifactEdgesNodeDeviceNodeInterfacesEdgesNode
+    ) -> DcimInterface:
+        """Reuse the queried port, including writes made earlier in this run."""
+        interfaces = getattr(self, "_hydrated_interfaces", None)
+        if interfaces is None:
+            interfaces = self._hydrated_interfaces = {}
+        if interface_node.id not in interfaces:
+            interfaces[interface_node.id] = await InfrahubNode.from_graphql(
+                client=self.client,
+                branch=self.branch,
+                data=interface_node.model_dump(by_alias=True, exclude_none=True),
+            )
+        return cast("DcimInterface", interfaces[interface_node.id])
 
     @staticmethod
     def _interface_label(interface: Any) -> str:
@@ -209,8 +215,7 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
                     f"{self._interface_label(existing_interface)}; cannot assign to {self._interface_label(interface_node)}"
                 )
 
-            iface_kind = INTERFACE_KIND_MAP.get(interface_node.typename__, DcimInterface)
-            interface = await self.client.get(iface_kind, id=interface_node.id)
+            interface = await self._interface_from_query(interface_node)
             interface.ip_address = existing_ip
             await interface.save(allow_upsert=True, update_group_context=False)
             self.logger.info(f"[{hostname}] Assigned existing {address_str} to {iface_name}")
@@ -236,8 +241,7 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
         await ip_address.save(allow_upsert=True, update_group_context=False)
         self.logger.info(f"[{hostname}] Ensured IP address {ip_iface}")
 
-        iface_kind = INTERFACE_KIND_MAP.get(interface_node.typename__, DcimInterface)
-        interface = await self.client.get(iface_kind, id=interface_node.id)
+        interface = await self._interface_from_query(interface_node)
         interface.ip_address = ip_address
         await interface.save(allow_upsert=True, update_group_context=False)
         self.logger.info(f"[{hostname}] Assigned {ip_iface} to {iface_name}")
@@ -252,8 +256,7 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
         """Update interface MTU."""
         iface_name = interface_node.name.value if interface_node.name else "unknown"
 
-        iface_kind = INTERFACE_KIND_MAP.get(interface_node.typename__, DcimInterface)
-        interface = await self.client.get(iface_kind, id=interface_node.id)
+        interface = await self._interface_from_query(interface_node)
         interface.mtu.value = mtu
         if avd_source and hasattr(interface.mtu, "source"):
             interface.mtu.source = NodeProperty(avd_source)
@@ -535,6 +538,7 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
 
     async def generate(self, data: dict) -> None:
         """Backfill IPs, MTU, and routing config from structured config into the data model."""
+        self._hydrated_interfaces = {}
         data: BackfillStructuredConfigQuery = BackfillStructuredConfigQuery(**data)
         artifact = data.avd_artifact.edges[0].node
 
