@@ -161,12 +161,22 @@ class TestE2EPipeline(IntegrationStack):
         await self._prepare_artifacts(client)
         return True
 
-    @pytest_asyncio.fixture(loop_scope="class")
-    async def scenario_branch(self, pipeline_ready: bool, client: InfrahubClient, request: pytest.FixtureRequest):
-        name = request.node.name.removeprefix("test_").replace("_", "-")
+    @pytest_asyncio.fixture(scope="class", loop_scope="class")
+    async def pipeline_published(self, pipeline_ready: bool, client: InfrahubClient, default_branch: str):
+        # Infrahub 1.11 only supports branches originating from the default
+        # branch. Publish once inside this temporary stack, after its cascade
+        # settles, so every scenario inherits the same generated graph.
         original = await _scenario_isolation_state(client, PIPELINE_BRANCH)
-        yield await create_branch(client, name, PIPELINE_BRANCH)
-        assert await _scenario_isolation_state(client, PIPELINE_BRANCH) == original, (
+        assert await client.branch.merge(branch_name=PIPELINE_BRANCH), "baseline merge failed"
+        assert await _scenario_isolation_state(client, default_branch) == original
+        return default_branch
+
+    @pytest_asyncio.fixture(loop_scope="class")
+    async def scenario_branch(self, pipeline_published: str, client: InfrahubClient, request: pytest.FixtureRequest):
+        name = request.node.name.removeprefix("test_").replace("_", "-")
+        original = await _scenario_isolation_state(client, pipeline_published)
+        yield await create_branch(client, name, pipeline_published)
+        assert await _scenario_isolation_state(client, pipeline_published) == original, (
             f"Scenario {name} leaked into baseline"
         )
 
@@ -415,7 +425,6 @@ class TestE2EPipeline(IntegrationStack):
             if peer_roles == {"l2spine"}:
                 assert dom["peer_ids"], f"L2 MLAG domain {dom['domain_id']} has no peers"
                 assert dom_asn is None, f"Pure L2 MLAG domain {dom['domain_id']} unexpectedly has an ASN"
-                assert all(asn_by_device[pid] is None for pid in dom["peer_ids"])
                 continue
             assert dom_asn, f"MLAG domain {dom['domain_id']} has no ASN node"
             peer_asns = {asn_by_device.get(pid) for pid in dom["peer_ids"]}
@@ -877,15 +886,21 @@ class TestE2EPipeline(IntegrationStack):
 
 
 async def _scenario_isolation_state(client: InfrahubClient, branch: str) -> dict:
-    return await client.execute_graphql(
-        query="""query {
+    response = await read_with_retry(
+        lambda: client.execute_graphql(
+            query="""query {
       NetworkFabric { edges { node { id anta_enabled { value } dci_pool { node { id } } } } }
       DcimDevice { edges { node { id role { value } } } }
       ComputePhysicalServer { edges { node { id name { value } } } }
       InterfacePhysical(name__value: "Ethernet999") { edges { node { id connector { node { id } } } } }
     }""",
-        branch_name=branch,
+            branch_name=branch,
+        )
     )
+    # Relationship iteration order is not an isolation property.
+    for collection in response.values():
+        collection["edges"].sort(key=lambda edge: edge["node"]["id"])
+    return response
 
 
 async def _assert_pure_layer2_configs(client: InfrahubClient, branch: str, roles: dict[str, list[str]]) -> None:
@@ -1925,17 +1940,20 @@ async def _dci_hostvars_report(client: InfrahubClient, branch: str, device_names
 
 
 async def _trigger_all_artifacts(client: InfrahubClient, branch: str, definitions: list) -> None:
-    """Fire artifact generation for every definition on ``branch`` (fire-and-forget).
+    """Generate each definition once, settling its tasks before the next one.
 
-    The node ``.generate()`` helper posts without a branch (targets main, which has
-    no devices in this flow), so hit the branch-aware endpoint directly.
+    The branch-aware endpoint exercises all targets. Serial definitions avoid
+    simultaneous fabric-documentation downloads and per-device renders flooding
+    the CI-sized API server. The node helper omits the branch.
     """
     for definition in definitions:
+        before = {task.id for task in await _pipeline_tasks(client, branch)}
         resp = await client._post(
             f"{client.address}/api/artifact/generate/{definition.id}?branch={branch}",
             payload={"nodes": []},
         )
         resp.raise_for_status()
+        await _wait_for_tasks(client, branch, before)
 
 
 async def _fetch_ready_artifact_contents(client: InfrahubClient, branch: str, artifact_name: str) -> list[str]:

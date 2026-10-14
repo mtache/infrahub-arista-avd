@@ -421,3 +421,42 @@ def test_stack_makes_only_public_bind_configs_readable(tmp_path: Path) -> None:
     assert (tmp_path / "haproxy.cfg").stat().st_mode & 0o777 == 0o644
     assert (tmp_path / "prometheus.yml").stat().st_mode & 0o777 == 0o644
     assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600
+
+
+@pytest.mark.asyncio
+async def test_artifact_definitions_settle_before_the_next_definition(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.integration import test_e2e_pipeline as pipeline
+
+    client = Mock(address="http://test")
+    events = []
+
+    async def post(url: str, payload: dict) -> Mock:
+        assert payload == {"nodes": []}
+        events.append(url.rsplit("/", 1)[-1])
+        return Mock()
+
+    async def settled(client: object, branch: str, before: set[str]) -> None:
+        assert branch == "scenario" and before == {"old"}
+        events.append("settled")
+
+    client._post = AsyncMock(side_effect=post)
+    monkeypatch.setattr(pipeline, "_pipeline_tasks", AsyncMock(return_value=[Mock(id="old")]))
+    monkeypatch.setattr(pipeline, "_wait_for_tasks", settled)
+    await pipeline._trigger_all_artifacts(client, "scenario", [Mock(id="first"), Mock(id="second")])
+    assert events == ["first?branch=scenario", "settled", "second?branch=scenario", "settled"]
+
+
+@pytest.mark.asyncio
+async def test_scenario_isolation_retries_transient_reads_and_ignores_graphql_order() -> None:
+    from tests.integration.test_e2e_pipeline import _scenario_isolation_state
+
+    client = Mock()
+    client.execute_graphql = AsyncMock(
+        side_effect=[
+            GraphQLError(errors=[{"message": "busy", "extensions": {"code": 429}}], query=""),
+            {"DcimDevice": {"edges": [{"node": {"id": "b"}}, {"node": {"id": "a"}}]}},
+            {"DcimDevice": {"edges": [{"node": {"id": "a"}}, {"node": {"id": "b"}}]}},
+        ]
+    )
+    assert await _scenario_isolation_state(client, "main") == await _scenario_isolation_state(client, "main")
+    assert client.execute_graphql.await_count == 3

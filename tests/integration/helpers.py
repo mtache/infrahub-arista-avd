@@ -201,7 +201,7 @@ async def storage_content(client: InfrahubClient, storage_id: str) -> str:
 
 
 async def create_branch(client: InfrahubClient, name: str, origin: str) -> str:
-    """Fork a known stable state instead of implicitly branching from main."""
+    """Create a branch from the known stable default-branch state."""
     response = await client.execute_graphql(
         query="""mutation($name: String!, $origin: String!) {
           BranchCreate(data: {name: $name, origin_branch: $origin, sync_with_git: false}) { ok }
