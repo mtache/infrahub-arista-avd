@@ -30,7 +30,7 @@ import json
 import os
 import shlex
 import time
-from operator import itemgetter, not_
+from operator import itemgetter
 from typing import TYPE_CHECKING
 
 import pytest
@@ -690,20 +690,26 @@ class TestE2EPipeline(IntegrationStack):
         """Every AVD artifact definition yields at least one Ready artifact on the branch (FR-011/FR-013)."""
         definitions = await client.all(kind="CoreArtifactDefinition", branch=PIPELINE_BRANCH)
         assert definitions, "no artifact definitions registered (repository sync incomplete?)"
+        previous_tasks = {task.id for task in await client.task.filter(TaskFilter(branch=PIPELINE_BRANCH))}
         await _trigger_all_artifacts(client, PIPELINE_BRANCH, definitions)
 
         started = time.monotonic()
         retriggered = False
+        quiet = 0
 
-        async def missing_artifacts() -> list[str]:
+        async def artifact_state() -> tuple[list[str], bool]:
+            nonlocal quiet
+            tasks = await _execution_tasks(client, PIPELINE_BRANCH, previous_tasks)
+            quiet = quiet + 1 if tasks and all(task.state == "COMPLETED" for task in tasks) else 0
             artifacts = await client.all(kind="CoreArtifact", branch=PIPELINE_BRANCH, prefetch_relationships=False)
             failed = [a.name.value for a in artifacts if a.status.value == "Error"]
             assert not failed, f"Artifact generation failed: {failed}"
             ready = {a.name.value for a in artifacts if a.status.value == "Ready"}
-            return sorted(set(ALL_ARTIFACT_NAMES) - ready)
+            return sorted(set(ALL_ARTIFACT_NAMES) - ready), quiet >= 2
 
-        async def retry_missing(missing: list[str]) -> None:
+        async def retry_missing(state: tuple[list[str], bool]) -> None:
             nonlocal retriggered
+            missing, _ = state
             if not retriggered and time.monotonic() - started >= ARTIFACT_TIMEOUT / 2:
                 retriggered = True
                 await _trigger_all_artifacts(
@@ -711,8 +717,8 @@ class TestE2EPipeline(IntegrationStack):
                 )
 
         await wait_until(
-            fetch=missing_artifacts,
-            ready=not_,
+            fetch=artifact_state,
+            ready=lambda state: not state[0] and state[1],
             timeout=ARTIFACT_TIMEOUT,
             interval=POLL_INTERVAL,
             describe="all artifact definitions produced Ready artifacts",
@@ -724,13 +730,8 @@ class TestE2EPipeline(IntegrationStack):
     @pytest.mark.asyncio(loop_scope="class")
     async def test_artifact_content(self, client: InfrahubClient) -> None:
         """A rendered EOS config mentions its device hostname; the ANTA catalog is populated (FR-012)."""
-        eos_contents = await wait_until(
-            fetch=lambda: _fetch_ready_artifact_contents(client, PIPELINE_BRANCH, ARTIFACT_AVD_EOS_CONFIG),
-            ready=lambda contents: any("hostname" in content for content in contents),
-            timeout=ARTIFACT_TIMEOUT,
-            interval=POLL_INTERVAL,
-            describe="a rendered EOS configuration artifact on the branch",
-        )
+        eos_contents = await _fetch_ready_artifact_contents(client, PIPELINE_BRANCH, ARTIFACT_AVD_EOS_CONFIG)
+        assert any("hostname" in content for content in eos_contents), "No rendered EOS configuration has a hostname"
         eos_content = next(content for content in eos_contents if "hostname" in content)
         assert eos_content.strip(), "EOS configuration artifact is empty"
 
@@ -749,13 +750,8 @@ class TestE2EPipeline(IntegrationStack):
                     return True
             return False
 
-        clab_contents = await wait_until(
-            fetch=lambda: _fetch_ready_artifact_contents(client, PIPELINE_BRANCH, ARTIFACT_CONTAINERLAB_TOPOLOGY),
-            ready=_has_populated_topology,
-            timeout=ARTIFACT_TIMEOUT,
-            interval=POLL_INTERVAL,
-            describe="a populated ContainerLab topology artifact on the branch",
-        )
+        clab_contents = await _fetch_ready_artifact_contents(client, PIPELINE_BRANCH, ARTIFACT_CONTAINERLAB_TOPOLOGY)
+        assert _has_populated_topology(clab_contents), "No populated ContainerLab topology artifact on the branch"
         topos = [yaml.safe_load(c) for c in clab_contents if c and c.strip()]
         populated = [
             t for t in topos if (t.get("topology") or {}).get("nodes") and (t.get("topology") or {}).get("links")
@@ -797,6 +793,10 @@ class TestE2EPipeline(IntegrationStack):
         # Establish disabled-marker catalogs before the proposed change. This
         # makes the subsequent marker -> populated transition prove that the
         # proposed-change artifact validator actually re-rendered the devices.
+        initial_storage = await _fetch_ready_artifact_storage_by_target(
+            client, scenario_branch, ARTIFACT_AVD_ANTA_CATALOG
+        )
+        previous_tasks = {task.id for task in await client.task.filter(TaskFilter(branch=scenario_branch))}
         fabric.anta_enabled.value = False
         await fabric.save()
         response = await client._post(
@@ -804,20 +804,14 @@ class TestE2EPipeline(IntegrationStack):
             payload={"nodes": list(device_ids_by_name.values())},
         )
         response.raise_for_status()
-        await wait_until(
-            fetch=lambda: _fetch_ready_artifact_contents_by_target(
-                client,
-                scenario_branch,
-                ARTIFACT_AVD_ANTA_CATALOG,
-            ),
-            ready=lambda contents: all(
-                ANTA_DISABLED_MARKER in contents.get(device_name, "") for device_name in device_ids_by_name
-            ),
-            timeout=ARTIFACT_TIMEOUT,
-            interval=POLL_INTERVAL,
-            describe=f"disabled ANTA marker catalogs for {PROPOSED_CHANGE_ANTA_FABRIC}",
+        await _wait_for_tasks(client, scenario_branch, previous_tasks)
+        disabled_storage = await _wait_for_new_artifact_storage(
+            client, scenario_branch, ARTIFACT_AVD_ANTA_CATALOG, set(device_ids_by_name), initial_storage
         )
+        disabled = {name: await storage_content(client, identifier) for name, identifier in disabled_storage.items()}
+        assert all(ANTA_DISABLED_MARKER in disabled.get(name, "") for name in device_ids_by_name)
 
+        previous_tasks = {task.id for task in await client.task.filter(TaskFilter(branch=scenario_branch))}
         fabric.anta_enabled.value = True
         await fabric.save()
         proposed_change = await client.create(
@@ -829,21 +823,14 @@ class TestE2EPipeline(IntegrationStack):
             },
         )
         await proposed_change.save()
-
-        refreshed = await wait_until(
-            fetch=lambda: _fetch_ready_artifact_contents_by_target(
-                client,
-                scenario_branch,
-                ARTIFACT_AVD_ANTA_CATALOG,
-            ),
-            ready=lambda contents: all(
-                "anta.tests." in contents.get(device_name, "")
-                and ANTA_DISABLED_MARKER not in contents.get(device_name, "")
-                for device_name in device_ids_by_name
-            ),
-            timeout=ARTIFACT_TIMEOUT,
-            interval=POLL_INTERVAL,
-            describe=f"proposed-change ANTA catalogs for {PROPOSED_CHANGE_ANTA_FABRIC}",
+        await _wait_for_tasks(client, scenario_branch, previous_tasks)
+        refreshed_storage = await _wait_for_new_artifact_storage(
+            client, scenario_branch, ARTIFACT_AVD_ANTA_CATALOG, set(device_ids_by_name), disabled_storage
+        )
+        refreshed = {name: await storage_content(client, identifier) for name, identifier in refreshed_storage.items()}
+        assert all(
+            "anta.tests." in refreshed.get(name, "") and ANTA_DISABLED_MARKER not in refreshed.get(name, "")
+            for name in device_ids_by_name
         )
         assert set(device_ids_by_name) <= set(refreshed)
 
@@ -1808,11 +1795,7 @@ async def _wait_for_tasks(client: InfrahubClient, branch: str, before: set[str])
 
     async def fetch() -> tuple[list, bool]:
         nonlocal quiet
-        tasks = [task for task in await client.task.filter(TaskFilter(branch=branch)) if task.id not in before]
-        failed = [task for task in tasks if task.state in {"FAILED", "CRASHED", "CANCELLED"}]
-        if failed:
-            details = [await client.task.get(task.id, include_logs=True) for task in failed]
-            raise AssertionError(f"Tasks failed on {branch}: {details}")
+        tasks = await _execution_tasks(client, branch, before)
         active = [task for task in tasks if task.state != "COMPLETED"]
         quiet = quiet + 1 if tasks and not active else 0
         return tasks, quiet >= 2
@@ -1825,6 +1808,15 @@ async def _wait_for_tasks(client: InfrahubClient, branch: str, before: set[str])
         describe=f"new execution and cascades settled on {branch}",
     )
     print(f"Completed tasks on {branch}: {[task.id for task in tasks]}", flush=True)
+
+
+async def _execution_tasks(client: InfrahubClient, branch: str, before: set[str]) -> list:
+    tasks = [task for task in await client.task.filter(TaskFilter(branch=branch)) if task.id not in before]
+    failed = [task for task in tasks if task.state in {"FAILED", "CRASHED", "CANCELLED"}]
+    if failed:
+        details = [await client.task.get(task.id, include_logs=True) for task in failed]
+        raise AssertionError(f"Tasks failed on {branch}: {details}")
+    return tasks
 
 
 async def _dci_hostvars_report(client: InfrahubClient, branch: str, device_names: list[str]) -> dict:
@@ -1929,12 +1921,12 @@ async def _fetch_ready_artifact_contents(client: InfrahubClient, branch: str, ar
     return contents
 
 
-async def _fetch_ready_artifact_contents_by_target(
+async def _fetch_ready_artifact_storage_by_target(
     client: InfrahubClient,
     branch: str,
     artifact_name: str,
 ) -> dict[str, str]:
-    """Return Ready artifact contents keyed by target display label."""
+    """Poll metadata without downloading content until the execution settles."""
     query = (
         "query {\n"
         f'  CoreArtifact(name__value: "{artifact_name}") {{\n'
@@ -1947,17 +1939,30 @@ async def _fetch_ready_artifact_contents_by_target(
         "}"
     )
     response = await client.execute_graphql(query=query, branch_name=branch)
-    contents: dict[str, str] = {}
+    storage: dict[str, str] = {}
     for edge in response["CoreArtifact"]["edges"]:
         node = edge["node"]
+        assert node.get("status", {}).get("value") != "Error", f"Artifact failed on {branch}: {node}"
         if node.get("status", {}).get("value") != "Ready":
             continue
         storage_id = node.get("storage_id", {}).get("value")
         target = (node.get("object") or {}).get("node") or {}
         target_name = target.get("display_label")
         if storage_id and target_name:
-            contents[target_name] = await storage_content(client, storage_id)
-    return contents
+            storage[target_name] = storage_id
+    return storage
+
+
+async def _wait_for_new_artifact_storage(
+    client: InfrahubClient, branch: str, artifact_name: str, targets: set[str], previous: dict[str, str]
+) -> dict[str, str]:
+    return await wait_until(
+        fetch=lambda: _fetch_ready_artifact_storage_by_target(client, branch, artifact_name),
+        ready=lambda storage: all(name in storage and storage[name] != previous.get(name) for name in targets),
+        timeout=ARTIFACT_TIMEOUT,
+        interval=POLL_INTERVAL,
+        describe=f"new Ready {artifact_name} storage for {sorted(targets)} on {branch}",
+    )
 
 
 async def _fabric_device_ids_by_name(

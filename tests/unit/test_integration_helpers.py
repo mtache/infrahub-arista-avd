@@ -28,6 +28,54 @@ def test_seed_introspection_includes_profiles_and_templates() -> None:
 
 
 @pytest.mark.asyncio
+async def test_artifact_poll_rejects_stale_storage_without_downloading_contents(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.integration import test_e2e_pipeline as pipeline
+
+    def artifact(identifier: str, status: str = "Ready") -> dict:
+        return {
+            "CoreArtifact": {
+                "edges": [
+                    {
+                        "node": {
+                            "status": {"value": status},
+                            "storage_id": {"value": identifier},
+                            "object": {"node": {"display_label": "leaf-1"}},
+                        }
+                    }
+                ]
+            }
+        }
+
+    client = Mock()
+    client.execute_graphql = AsyncMock(side_effect=[artifact("old"), artifact("new", "Pending"), artifact("new")])
+    client.object_store.get = AsyncMock()
+    monkeypatch.setattr(pipeline, "POLL_INTERVAL", 0.001)
+    assert await pipeline._wait_for_new_artifact_storage(client, "anta", "ANTA", {"leaf-1"}, {"leaf-1": "old"}) == {
+        "leaf-1": "new"
+    }
+    assert client.execute_graphql.await_count == 3
+    client.object_store.get.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_new_task_failures_are_immediate_and_prior_failures_are_ignored() -> None:
+    from tests.integration.test_e2e_pipeline import _execution_tasks
+
+    previous = Mock(id="prior", state="FAILED")
+    current = Mock(id="current", state="RUNNING")
+    client = Mock()
+    client.task.filter = AsyncMock(return_value=[previous, current])
+    client.task.get = AsyncMock(return_value="failure detail")
+    assert await _execution_tasks(client, "scenario", {"prior"}) == [current]
+    current.state = "FAILED"
+    with pytest.raises(AssertionError, match="failure detail"):
+        await _execution_tasks(client, "scenario", {"prior"})
+    client.task.get.assert_awaited_once_with("current", include_logs=True)
+
+
+@pytest.mark.asyncio
 async def test_poll_has_a_deadline_even_when_fetch_never_returns() -> None:
     async def blocked() -> None:
         await asyncio.Event().wait()
