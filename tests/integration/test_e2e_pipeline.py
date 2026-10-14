@@ -1192,11 +1192,23 @@ async def _ipam_duplicate_report(client: InfrahubClient, branch: str) -> dict:
           }
         }
       }
-      DcimInterface(offset: $offset, limit: $limit) @include(if: $details) {
+      DcimInterface(offset: $offset, limit: $limit, ip_address__isnull: false) @include(if: $details) {
         count
         edges {
           node {
             id
+            __typename
+            name { value }
+            role { value }
+            device {
+              node {
+                ... on DcimDevice {
+                  id
+                  vtep_loopback_ip { node { id } }
+                  mlag_domain { node { id peers { edges { node { id } } } } }
+                }
+              }
+            }
             ip_address {
               node {
                 id
@@ -1226,6 +1238,7 @@ async def _ipam_duplicate_report(client: InfrahubClient, branch: str) -> dict:
             key_to_interface_ids.setdefault(key, set()).add(interface["id"])
 
     primary_assigned = 0
+    primary_interfaces = {}
     for edge in resp["DcimInterface"]["edges"]:
         interface = edge["node"]
         node = (interface.get("ip_address") or {}).get("node")
@@ -1236,6 +1249,7 @@ async def _ipam_duplicate_report(client: InfrahubClient, branch: str) -> dict:
         key = (address, namespace)
         assert node["id"] in key_to_ip_ids.get(key, []), f"primary IP {node['id']} missing from IPAM read"
         key_to_interface_ids.setdefault(key, set()).add(interface["id"])
+        primary_interfaces[interface["id"]] = interface
         primary_assigned += 1
 
     duplicate_ip_keys = {
@@ -1243,18 +1257,55 @@ async def _ipam_duplicate_report(client: InfrahubClient, branch: str) -> dict:
         for (address, namespace), ip_ids in key_to_ip_ids.items()
         if len(ip_ids) > 1
     }
-    duplicate_interface_ips = {
-        f"{address} [{namespace}]": sorted(interface_ids)
-        for (address, namespace), interface_ids in key_to_interface_ids.items()
-        if len(interface_ids) > 1
-    }
+    duplicate_interface_ips = {}
+    shared_mlag_vteps = {}
+    for (address, namespace), interface_ids in key_to_interface_ids.items():
+        if len(interface_ids) < 2:
+            continue
+        label = f"{address} [{namespace}]"
+        if _is_shared_mlag_vtep([primary_interfaces.get(identifier) for identifier in sorted(interface_ids)]):
+            shared_mlag_vteps[label] = sorted(interface_ids)
+        else:
+            duplicate_interface_ips[label] = sorted(interface_ids)
     return {
         "total": sum(len(ip_ids) for ip_ids in key_to_ip_ids.values()),
         "assigned": sum(len(ids) for ids in key_to_interface_ids.values()),
         "primary_assigned": primary_assigned,
         "duplicate_ip_keys": duplicate_ip_keys,
         "duplicate_interface_ips": duplicate_interface_ips,
+        "shared_mlag_vteps": shared_mlag_vteps,
     }
+
+
+def _is_shared_mlag_vtep(interfaces: list[dict | None]) -> bool:
+    """Validate the modeled two-peer anycast VTEP; all other sharing is a duplicate."""
+    if len(interfaces) != 2 or any(interface is None for interface in interfaces):
+        return False
+    devices = []
+    domains = []
+    for interface in interfaces:
+        assert interface is not None
+        if (
+            interface.get("__typename") != "InterfaceVirtual"
+            or (interface.get("name") or {}).get("value") != "Loopback1"
+            or (interface.get("role") or {}).get("value") != "vtep_loopback"
+        ):
+            return False
+        device = (interface.get("device") or {}).get("node") or {}
+        domain = (device.get("mlag_domain") or {}).get("node") or {}
+        ip_id = ((interface.get("ip_address") or {}).get("node") or {}).get("id")
+        vtep_ip_id = ((device.get("vtep_loopback_ip") or {}).get("node") or {}).get("id")
+        if not device.get("id") or not domain.get("id") or not ip_id or ip_id != vtep_ip_id:
+            return False
+        devices.append(device["id"])
+        domains.append(domain)
+    device_ids = set(devices)
+    return (
+        len(device_ids) == 2
+        and domains[0]["id"] == domains[1]["id"]
+        and all({edge["node"]["id"] for edge in domain["peers"]["edges"]} == device_ids for domain in domains)
+        and interfaces[0]["ip_address"]["node"]["id"] == interfaces[1]["ip_address"]["node"]["id"]
+    )
 
 
 async def _server_cabling_prerequisites(client: InfrahubClient, branch: str) -> dict:

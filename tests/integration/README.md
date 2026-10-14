@@ -57,6 +57,9 @@ keeps later rack regeneration targeted. It
 observes new task IDs and their cascades, including generator/artifact tasks
 without branch metadata. Snapshot polling reads metadata; once settled,
 comparisons read actual storage contents, checksums and IP assignments.
+IP uniqueness checks include primary interface assignments. Sharing is accepted
+only for the same VTEP IP on the two virtual `Loopback1` interfaces of an exact
+two-peer MLAG domain, with matching device VTEP references; other duplicates fail.
 Storage downloads are cached per client and storage ID with at most two concurrent
 reads. The targeted artifact endpoint receives artifact IDs rather than device
 IDs. Rack snapshots paginate all collections, preserve both passes on disk, and

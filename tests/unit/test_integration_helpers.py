@@ -1,6 +1,7 @@
 """Offline regressions for bounded integration reads and storage pressure."""
 
 import asyncio
+from copy import deepcopy
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
@@ -374,6 +375,86 @@ async def test_ip_uniqueness_reads_primary_assignments_and_deduplicates_inverse_
     assert not report["duplicate_ip_keys"]
     assert report["duplicate_interface_ips"] == {f"10.0.0.1/31 [{namespace}]": ["left", "right"]}
     assert "DcimInterface(offset:" in client.execute_graphql.await_args.kwargs["query"]
+
+
+def _mlag_vtep_interfaces() -> list[dict]:
+    domain = {"id": "mlag", "peers": {"edges": [{"node": {"id": peer}} for peer in ("leaf-a", "leaf-b")]}}
+    return [
+        {
+            "id": f"{peer}-vtep",
+            "__typename": "InterfaceVirtual",
+            "name": {"value": "Loopback1"},
+            "role": {"value": "vtep_loopback"},
+            "ip_address": {"node": {"id": "shared-ip"}},
+            "device": {
+                "node": {
+                    "id": peer,
+                    "vtep_loopback_ip": {"node": {"id": "shared-ip"}},
+                    "mlag_domain": {"node": deepcopy(domain)},
+                }
+            },
+        }
+        for peer in ("leaf-a", "leaf-b")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_primary_ip_report_validates_the_modeled_mlag_anycast_vtep() -> None:
+    from tests.integration.test_e2e_pipeline import _ipam_duplicate_report
+
+    address = {
+        "id": "shared-ip",
+        "address": {"value": "10.0.1.1/32"},
+        "ip_namespace": {"node": {"name": {"value": "default"}}},
+    }
+    interfaces = _mlag_vtep_interfaces()
+    for interface in interfaces:
+        interface["ip_address"]["node"] = address
+    client = Mock(
+        execute_graphql=AsyncMock(
+            return_value={
+                "IpamIPAddress": {"count": 1, "edges": [{"node": address}]},
+                "DcimInterface": {"count": 2, "edges": [{"node": interface} for interface in interfaces]},
+            }
+        )
+    )
+    report = await _ipam_duplicate_report(client, "scenario")
+    assert report["primary_assigned"] == report["assigned"] == 2
+    assert report["duplicate_ip_keys"] == report["duplicate_interface_ips"] == {}
+    assert report["shared_mlag_vteps"] == {"10.0.1.1/32 [default]": ["leaf-a-vtep", "leaf-b-vtep"]}
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["physical", "loopback0", "role", "domain", "peers", "vtep_ip", "ip", "same_device", "third", "inverse_only"],
+)
+def test_anycast_vtep_validation_rejects_unmodeled_sharing(fault: str) -> None:
+    from tests.integration.test_e2e_pipeline import _is_shared_mlag_vtep
+
+    interfaces = _mlag_vtep_interfaces()
+    second = interfaces[1]
+    device = second["device"]["node"]
+    if fault == "physical":
+        second["__typename"] = "InterfacePhysical"
+    elif fault == "loopback0":
+        second["name"]["value"] = "Loopback0"
+    elif fault == "role":
+        second["role"]["value"] = "loopback"
+    elif fault == "domain":
+        device["mlag_domain"]["node"]["id"] = "another-domain"
+    elif fault == "peers":
+        device["mlag_domain"]["node"]["peers"]["edges"].append({"node": {"id": "leaf-c"}})
+    elif fault == "vtep_ip":
+        device["vtep_loopback_ip"]["node"]["id"] = "another-ip"
+    elif fault == "ip":
+        device["vtep_loopback_ip"]["node"]["id"] = second["ip_address"]["node"]["id"] = "another-ip"
+    elif fault == "same_device":
+        device["id"] = "leaf-a"
+    elif fault == "third":
+        interfaces.append(deepcopy(second))
+    elif fault == "inverse_only":
+        interfaces[1] = None
+    assert not _is_shared_mlag_vtep(interfaces)
 
 
 @pytest.mark.asyncio
