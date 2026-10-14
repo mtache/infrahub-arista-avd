@@ -175,6 +175,9 @@ Template reconciliation retains physical ports already owned by the target's
 tracking group on an unchanged run. Existing manual ports stay outside that
 group. Cabling updates connectors without claiming either endpoint, so a rack
 rerun cannot delete a spine port through its own cleanup.
+Generated uplinks whose role is already correct are retained in the target's
+tracking group without rewriting their attributes. Missing roles and connectors
+still follow normal reconciliation.
 
 ```graphql
 query RackGenerator($rack_id: String!) {

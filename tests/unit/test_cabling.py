@@ -11,6 +11,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from infrahub_sdk.constants import InfrahubClientMode
+from infrahub_sdk.query_groups import InfrahubGroupContext
 
 from solution_arista_avd.cabling import (
     _build_link_specs,  # noqa: PLC2701 - direct coverage of deterministic generated naming
@@ -404,6 +406,7 @@ class TestConnectInterfaceMaps:
         client = SimpleNamespace(
             filters=AsyncMock(side_effect=[[dst_conflict, src_new, dst_existing, src_existing, dst_new], [existing]]),
             create=AsyncMock(return_value=new),
+            group_context=SimpleNamespace(add_related_nodes=AsyncMock()),
         )
         logger = MagicMock()
 
@@ -417,7 +420,8 @@ class TestConnectInterfaceMaps:
         assert client.filters.await_count == 2
         client.create.assert_awaited_once_with(NetworkLink, name="Uplink leaf-2__spine-1", role="uplink")
         assert existing.medium.value == "copper"
-        existing.save.assert_awaited_once_with(allow_upsert=True)
+        existing.save.assert_not_awaited()
+        client.group_context.add_related_nodes.assert_awaited_once_with(ids=[existing.id])
         new.save.assert_awaited_once_with(allow_upsert=True)
         assert src_new.connector is new
         assert dst_new.connector is new
@@ -427,6 +431,52 @@ class TestConnectInterfaceMaps:
         src_existing.save.assert_not_awaited()
         dst_existing.save.assert_not_awaited()
         assert any("Preserved existing connector" in call.args[0] for call in logger.warning.call_args_list)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("initial_role", [None, "uplink"])
+    @pytest.mark.parametrize("missing_endpoint", [False, True])
+    async def test_two_uplink_passes_retain_tracking_without_rewriting_unchanged_links(
+        self, initial_role: str | None, missing_endpoint: bool
+    ) -> None:
+        src = _physical_interface("src", "leaf-1", "Ethernet49", connector_id="uplink")
+        dst = _physical_interface("dst", "spine-1", "Ethernet1", connector_id=None if missing_endpoint else "uplink")
+        uplink = SimpleNamespace(
+            id="uplink",
+            name=SimpleNamespace(value="Uplink leaf-1__spine-1"),
+            medium=SimpleNamespace(value="copper"),
+            role=SimpleNamespace(value=initial_role),
+            save=AsyncMock(),
+        )
+        client = SimpleNamespace(
+            filters=AsyncMock(side_effect=[[src, dst], [uplink], [src, dst], [uplink]]),
+            create=AsyncMock(),
+            mode=InfrahubClientMode.TRACKING,
+        )
+        context = InfrahubGroupContext(client)  # type: ignore[arg-type]
+        context.set_properties(identifier="rack-generator", params={"rack_id": "rack-1"})
+        client.group_context = context
+
+        async def save(**kwargs: object) -> None:
+            # Exercise the same SDK enrollment used by a real upsert on pass 1.
+            assert kwargs == {"allow_upsert": True}
+            await context.add_related_nodes(ids=[uplink.id])
+
+        uplink.save.side_effect = save
+        for _ in range(2):
+            context.related_node_ids.clear()
+            await connect_interface_maps(client, MagicMock(), [(src, dst)], link_role="uplink")  # type: ignore[arg-type]
+            assert context.related_node_ids == ["uplink"]
+            assert uplink.role.value == "uplink"
+            assert uplink.medium.value == "copper"
+            assert src.connector.id == dst.connector.id == "uplink"
+
+        client.create.assert_not_awaited()
+        assert uplink.save.await_count == (1 if initial_role is None else 0)
+        src.save.assert_not_awaited()
+        if missing_endpoint:
+            dst.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+        else:
+            dst.save.assert_not_awaited()
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("missing", ["endpoint", "link"])
