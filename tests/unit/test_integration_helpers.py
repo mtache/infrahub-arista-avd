@@ -150,3 +150,21 @@ async def test_poll_does_not_retry_pending_mutations() -> None:
         await wait_until(fetch, bool, timeout=1, interval=1, describe="generation", on_pending=action)
     action.assert_awaited_once()
     fetch.assert_awaited_once()
+
+
+def test_stack_makes_only_public_bind_configs_readable(tmp_path: Path) -> None:
+    from tests.integration.stack import IntegrationStack
+
+    for name in ("haproxy.cfg", "prometheus.yml", ".env"):
+        config = tmp_path / name
+        config.write_text("configuration")
+        config.chmod(0o600)
+    compose = Mock()
+    compose.start.side_effect = RuntimeError("startup timeout")
+    compose.get_logs.return_value = ("", "")
+    fixture = IntegrationStack.infrahub_app.__wrapped__(IntegrationStack(), compose, tmp_path)
+    with pytest.raises(RuntimeError, match="startup timeout"):
+        next(fixture)
+    assert (tmp_path / "haproxy.cfg").stat().st_mode & 0o777 == 0o644
+    assert (tmp_path / "prometheus.yml").stat().st_mode & 0o777 == 0o644
+    assert (tmp_path / ".env").stat().st_mode & 0o777 == 0o600

@@ -17,6 +17,12 @@ if TYPE_CHECKING:
 class IntegrationStack(TestInfrahubDockerClient):
     @pytest.fixture(scope="class")
     def infrahub_app(self, infrahub_compose: InfrahubDockerCompose, tmp_directory: Path) -> Iterator[dict[str, int]]:
+        # Job supervisors may use umask 077. These static, non-secret bind
+        # mounts must also be readable by HAProxy's unprivileged container user.
+        for name in ("haproxy.cfg", "prometheus.yml"):
+            config = tmp_directory / name
+            if config.exists():
+                config.chmod(0o644)
         try:
             infrahub_compose.start()
             yield infrahub_compose.get_services_port()
