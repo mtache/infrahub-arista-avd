@@ -85,6 +85,73 @@ async def test_poll_has_a_deadline_even_when_fetch_never_returns() -> None:
 
 
 @pytest.mark.asyncio
+async def test_inner_read_deadline_reports_its_actual_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.integration import helpers
+
+    monkeypatch.setattr(helpers, "READ_TIMEOUT", 0.02)
+
+    async def blocked() -> None:
+        await asyncio.Event().wait()
+
+    with pytest.raises(AssertionError, match=r"integration read timed out after 0\.02s"):
+        await wait_until(blocked, bool, timeout=1, interval=1, describe="longer poll")
+
+
+@pytest.mark.asyncio
+async def test_grouped_design_parity_paginates_without_per_node_reads() -> None:
+    from tests.integration.helpers import device_design_mismatches
+
+    def collection(nodes: list[dict], count: int | None = None) -> dict:
+        return {"count": len(nodes) if count is None else count, "edges": [{"node": node} for node in nodes]}
+
+    def page(offset: int) -> dict:
+        first = offset == 0
+        return {
+            "NetworkFabric": collection(
+                [{"id": "fabric", "underlay_routing_protocol": {"value": "ebgp"}}] if first else []
+            ),
+            "NetworkPod": collection(
+                [
+                    {
+                        "id": "pod",
+                        "name": {"value": "Pod"},
+                        "parent": {"node": {"__typename": "NetworkFabric", "id": "fabric"}},
+                    }
+                ]
+                if first
+                else []
+            ),
+            "LocationRack": collection(
+                [{"id": "rack", "name": {"value": "Rack"}, "pod": {"node": {"id": "pod"}}}] if first else []
+            ),
+            "NetworkPodDeviceDesign": collection([]),
+            "NetworkRackDeviceDesign": collection(
+                [{"role": {"value": "leaf"}, "device_quantity": {"value": 201}, "rack": {"node": {"id": "rack"}}}]
+                if first
+                else []
+            ),
+            "DcimDevice": collection(
+                [
+                    {
+                        "id": str(index),
+                        "role": {"value": "leaf"},
+                        "rack": {"node": {"id": "rack"}},
+                        "pod": {"node": {"id": "pod"}},
+                    }
+                    for index in range(offset, min(offset + 200, 201))
+                ],
+                count=201,
+            ),
+        }
+
+    client = Mock()
+    client.execute_graphql = AsyncMock(side_effect=[page(0), page(200)])
+    assert await device_design_mismatches(client, "baseline") == []
+    assert [call.kwargs["variables"]["offset"] for call in client.execute_graphql.await_args_list] == [0, 200]
+    client.get.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_poll_propagates_permanent_graphql_errors() -> None:
     fetch = AsyncMock(side_effect=GraphQLError(errors=[{"message": "At most, one relationship expected"}]))
     with pytest.raises(GraphQLError, match="one relationship"):
@@ -94,12 +161,41 @@ async def test_poll_propagates_permanent_graphql_errors() -> None:
 
 @pytest.mark.asyncio
 async def test_transient_read_respects_retry_after(monkeypatch: pytest.MonkeyPatch) -> None:
-    response = httpx.Response(429, headers={"Retry-After": "3"}, request=httpx.Request("GET", "http://test/content"))
+    response = httpx.Response(429, headers={"Retry-After": "9"}, request=httpx.Request("GET", "http://test/content"))
     sleep = AsyncMock()
     monkeypatch.setattr(asyncio, "sleep", sleep)
     fetch = AsyncMock(side_effect=[httpx.HTTPStatusError("limited", request=response.request, response=response), "ok"])
     assert await read_with_retry(fetch) == "ok"
-    sleep.assert_awaited_once_with(3)
+    sleep.assert_awaited_once_with(9)
+
+
+@pytest.mark.asyncio
+async def test_graphql_load_shedding_is_a_bounded_transient_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleep = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    shedding = GraphQLError(errors=[{"message": "Server is shedding load", "extensions": {"code": 429}}])
+    fetch = AsyncMock(side_effect=[shedding, "ok"])
+    assert await read_with_retry(fetch) == "ok"
+    sleep.assert_awaited_once_with(4)
+    fetch = AsyncMock(side_effect=shedding)
+    with pytest.raises(GraphQLError):
+        await read_with_retry(fetch)
+    assert fetch.await_count == 4
+
+
+@pytest.mark.asyncio
+async def test_graphql_transient_and_permanent_errors_together_are_not_retried() -> None:
+    fetch = AsyncMock(
+        side_effect=GraphQLError(
+            errors=[
+                {"message": "shedding", "extensions": {"code": 429}},
+                {"message": "At most, one relationship expected"},
+            ]
+        )
+    )
+    with pytest.raises(GraphQLError, match="one relationship"):
+        await read_with_retry(fetch)
+    assert fetch.await_count == 1
 
 
 @pytest.mark.asyncio

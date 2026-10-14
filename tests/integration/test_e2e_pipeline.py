@@ -62,6 +62,7 @@ from .helpers import (
     device_design_mismatches,
     expected_super_spine_count,
     fabric_deployment_report,
+    read_with_retry,
     storage_content,
     wait_until,
 )
@@ -355,7 +356,7 @@ class TestE2EPipeline(IntegrationStack):
         print(f"leaf devices: {len(leaves)}", flush=True)
 
     # --- Component 9a: device designs drive the generated device set -------
-    @pytest.mark.usefixtures("cascade_started")
+    @pytest.mark.usefixtures("pipeline_ready")
     @pytest.mark.asyncio(loop_scope="class")
     async def test_devices_match_device_designs(self, client: InfrahubClient) -> None:
         """Every pod/rack produced exactly the devices its device designs declare.
@@ -364,13 +365,7 @@ class TestE2EPipeline(IntegrationStack):
         guard for the whole chain: a design quantity that stops being honoured, or
         devices created for a role with no design, fails here.
         """
-        mismatches = await wait_until(
-            fetch=lambda: device_design_mismatches(client, PIPELINE_BRANCH),
-            ready=lambda problems: problems == [],
-            timeout=GENERATOR_TIMEOUT,
-            interval=POLL_INTERVAL,
-            describe="devices matching device designs",
-        )
+        mismatches = await read_with_retry(lambda: device_design_mismatches(client, PIPELINE_BRANCH))
         assert mismatches == [], "device/design mismatches: " + "; ".join(mismatches)
 
     # --- Component 9b: BGP ASN nodes (regression 002) ----------------------

@@ -10,13 +10,17 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import Counter, defaultdict
 from datetime import UTC, datetime
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from weakref import WeakKeyDictionary
 
 import httpx
-from infrahub_sdk.exceptions import ServerNotReachableError, ServerNotResponsiveError
+from infrahub_sdk.exceptions import GraphQLError, ServerNotReachableError, ServerNotResponsiveError
+
+from .device_design_parity_query import DeviceDesignParityQuery
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -128,30 +132,49 @@ async def wait_until[T](
         raise AssertionError(msg) from exc
 
 
+READ_TIMEOUT = 60
+
+
 async def read_with_retry[T](fetch: Callable[[], Awaitable[T]]) -> T:
     """Bound a read to 60 seconds, retrying only transient transport/HTTP errors.
 
     This helper must never wrap mutations: a lost response cannot establish
     whether a write was applied. Permanent GraphQL errors propagate immediately.
     """
-    async with asyncio.timeout(60):
-        for attempt in range(4):
-            delay = 2**attempt
-            try:
-                return await fetch()
-            except httpx.HTTPStatusError as exc:
-                if exc.response.status_code not in {429, 502, 503, 504} or attempt == 3:
-                    raise
-                retry_after = exc.response.headers.get("Retry-After")
-                if retry_after:
-                    try:
-                        delay = max(delay, float(retry_after))
-                    except ValueError:
-                        delay = max(delay, (parsedate_to_datetime(retry_after) - datetime.now(UTC)).total_seconds())
-            except httpx.TransportError, ServerNotReachableError, ServerNotResponsiveError:
-                if attempt == 3:
-                    raise
-            await asyncio.sleep(delay)
+    read_deadline = asyncio.timeout(READ_TIMEOUT)
+    try:
+        async with read_deadline:
+            return await _retry_read(fetch)
+    except TimeoutError as exc:
+        if not read_deadline.expired():
+            raise
+        raise AssertionError(f"integration read timed out after {READ_TIMEOUT}s") from exc
+
+
+async def _retry_read[T](fetch: Callable[[], Awaitable[T]]) -> T:
+    for attempt in range(4):
+        delay = 4 * 2**attempt
+        try:
+            return await fetch()
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in {429, 502, 503, 504} or attempt == 3:
+                raise
+            retry_after = exc.response.headers.get("Retry-After")
+            if retry_after:
+                try:
+                    delay = max(delay, float(retry_after))
+                except ValueError:
+                    delay = max(delay, (parsedate_to_datetime(retry_after) - datetime.now(UTC)).total_seconds())
+        except httpx.TransportError, ServerNotReachableError, ServerNotResponsiveError:
+            if attempt == 3:
+                raise
+        except GraphQLError as exc:
+            # Load shedding can be an HTTP 200 GraphQL error envelope.
+            # A mixed response containing a permanent error must still fail.
+            codes = [(error.get("extensions") or {}).get("code") for error in exc.errors]
+            if not codes or any(str(code) not in {"429", "502", "503", "504"} for code in codes) or attempt == 3:
+                raise
+        await asyncio.sleep(delay)
     raise AssertionError("unreachable")
 
 
@@ -214,48 +237,67 @@ async def device_design_mismatches(client: InfrahubClient, branch: str) -> list[
             return LEAF_ROLE_BY_UNDERLAY.get(underlay, "leaf")
         return design_role
 
-    # Underlay per pod (from its fabric) and per rack (from its pod).
-    underlay_by_pod: dict[str, str | None] = {}
-    pods = await client.all(kind="NetworkPod", branch=branch)
-    for pod in pods:
-        fabric = await client.get(kind="NetworkFabric", id=pod.parent.id, branch=branch)
-        protocol = getattr(fabric, "underlay_routing_protocol", None)
-        underlay_by_pod[pod.id] = protocol.value if protocol else None
-    racks = await client.all(kind="LocationRack", branch=branch)
-    underlay_by_rack = {rack.id: underlay_by_pod.get(rack.pod.id) if rack.pod else None for rack in racks}
+    query = Path(__file__).with_name("device_design_parity.gql").read_text()
+    entities: dict[str, list] = defaultdict(list)
+    offset = 0
+    while True:
+        response = await client.execute_graphql(
+            query=query, variables={"offset": offset, "limit": 200}, branch_name=branch
+        )
+        page = DeviceDesignParityQuery.model_validate(response)
+        collections = {key: getattr(page, key) for key in type(page).model_fields}
+        for key, collection in collections.items():
+            entities[key].extend(edge.node for edge in collection.edges if edge.node is not None)
+        offset += 200
+        if offset >= max(collection.count for collection in collections.values()):
+            break
+        assert any(collection.edges for collection in collections.values()), "Empty parity page before reported count"
 
-    # Devices bucketed by their rack, else by their pod (spines and super-spines).
-    per_rack: dict[str, dict[str, int]] = {}
-    per_pod: dict[str, dict[str, int]] = {}
-    for device in await client.all(kind="DcimDevice", branch=branch, prefetch_relationships=False):
-        bucket = per_rack.setdefault(device.rack.id, {}) if device.rack.id else None
-        if bucket is None and device.pod.id:
-            bucket = per_pod.setdefault(device.pod.id, {})
-        if bucket is not None:
-            bucket[device.role.value] = bucket.get(device.role.value, 0) + 1
+    underlay_by_fabric = {
+        fabric.id: fabric.underlay_routing_protocol.value if fabric.underlay_routing_protocol else None
+        for fabric in entities["network_fabric"]
+    }
+    underlay_by_pod = {
+        pod.id: underlay_by_fabric.get(pod.parent.node.id) if pod.parent.node else None
+        for pod in entities["network_pod"]
+    }
+    underlay_by_rack = {
+        rack.id: underlay_by_pod.get(rack.pod.node.id) if rack.pod.node else None for rack in entities["location_rack"]
+    }
+    per_rack: dict[str, Counter] = defaultdict(Counter)
+    per_pod: dict[str, Counter] = defaultdict(Counter)
+    for device in entities["dcim_device"]:
+        if device.rack.node:
+            per_rack[device.rack.node.id][device.role.value] += 1
+        elif device.pod.node:
+            per_pod[device.pod.node.id][device.role.value] += 1
 
-    mismatches: list[str] = []
-
-    async def check(design_kind: str, parent_attr: str, container_kind: str) -> None:
-        for design in await client.all(kind=design_kind, branch=branch):
-            container_id = getattr(design, parent_attr).id
+    mismatches = []
+    for parent_attr, container_kind, designs, containers, actual_counts, underlays in (
+        ("pod", "NetworkPod", entities["network_pod_device_design"], entities["network_pod"], per_pod, underlay_by_pod),
+        (
+            "rack",
+            "LocationRack",
+            entities["network_rack_device_design"],
+            entities["location_rack"],
+            per_rack,
+            underlay_by_rack,
+        ),
+    ):
+        names = {container.id: container.name.value for container in containers}
+        for design in designs:
+            parent = getattr(design, parent_attr).node
+            assert parent is not None, f"{container_kind} design has no container"
             role = design.role.value
             want = int(design.device_quantity.value)
-            if parent_attr == "rack":
-                actual, underlay = per_rack.get(container_id, {}), underlay_by_rack.get(container_id)
-            else:
-                actual, underlay = per_pod.get(container_id, {}), underlay_by_pod.get(container_id)
-            mapped = device_role(role, underlay)
+            mapped = device_role(role, underlays.get(parent.id))
+            actual = actual_counts[parent.id]
             got = actual.get(mapped, 0)
             if got != want:
-                container = await client.get(kind=container_kind, id=container_id, branch=branch)
                 mismatches.append(
-                    f"{container_kind} {container.name.value} design_role={role} -> "
-                    f"device_role={mapped}: design={want} actual={got}"
+                    f"{container_kind} {names[parent.id]} design_role={role} -> "
+                    f"device_role={mapped}: design={want} actual={got}; roles={dict(actual)}"
                 )
-
-    await check("NetworkPodDeviceDesign", "pod", "NetworkPod")
-    await check("NetworkRackDeviceDesign", "rack", "LocationRack")
     return mismatches
 
 
