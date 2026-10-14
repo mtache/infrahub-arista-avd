@@ -84,13 +84,6 @@ generator_definitions:
     parameters:
       name: name__value
     class_name: FabricGenerator
-    watch:
-      files:
-        - "generators/fabric_generator_query.py"
-        - "generators/asn.py"
-        - "src/solution_arista_avd/generator.py"
-        - "src/solution_arista_avd/pool_roles.py"
-        - "src/solution_arista_avd/protocols.py"
     convert_query_response: false
     execute_in_proposed_change: false
     execute_after_merge: false
@@ -102,16 +95,6 @@ generator_definitions:
     parameters:
       name: name__value
     class_name: PodGenerator
-    watch:
-      files:
-        - "generators/pod_generator_query.py"
-        - "generators/asn.py"
-        - "src/solution_arista_avd/generator.py"
-        - "src/solution_arista_avd/pool_roles.py"
-        - "src/solution_arista_avd/protocols.py"
-        - "src/solution_arista_avd/avd.py"
-        - "src/solution_arista_avd/cabling.py"
-        - "src/solution_arista_avd/sorting.py"
     convert_query_response: false
     execute_in_proposed_change: false
     execute_after_merge: false
@@ -123,21 +106,6 @@ generator_definitions:
     parameters:
       name: name__value
     class_name: RackGenerator
-    watch:
-      files:
-        - "generators/rack_generator_query.py"
-        - "generators/asn.py"
-        - "src/solution_arista_avd/generator.py"
-        - "src/solution_arista_avd/pool_roles.py"
-        - "src/solution_arista_avd/protocols.py"
-        - "src/solution_arista_avd/avd.py"
-        - "src/solution_arista_avd/cabling.py"
-        - "src/solution_arista_avd/sorting.py"
-        - "generators/hostvar_readiness.py"
-        - "generators/rack_hostvar_instances.gql"
-        - "generators/rack_hostvar_instances_query.py"
-        - "generators/rack_hostvar_readiness.gql"
-        - "generators/rack_hostvar_readiness_query.py"
     convert_query_response: false
     execute_in_proposed_change: false
     execute_after_merge: false
