@@ -163,8 +163,11 @@ query PodGenerator($pod_id: String!) {
 
 Hostvar readiness uses a paginated, typed read of devices and their stored
 hostvar-file references. The rack generator selects every device in the fabric
-when any file is missing during bootstrap; an existing fabric refreshes the
-rack devices and their pod spines. The hostvar generator uses the same grouped
+when any file is missing during bootstrap. Inherited files on a fresh branch
+also require full initialization: generator instances are local to that branch.
+Once every target has an instance, the fabric refreshes only the rack devices
+and their pod spines. Rack-completion checks group all non-fabric pods into one
+read with only the required attributes. The hostvar generator uses the same grouped
 read before setting the fabric ready for structured configuration. Both pod
 and rack membership are included, and devices from other fabrics are excluded.
 

@@ -160,7 +160,21 @@ async def test_artifact_tasks_without_branch_are_also_observed() -> None:
     client = Mock()
     client.task.filter = AsyncMock(side_effect=[[], [artifact]])
     assert await _execution_tasks(client, "scenario", set()) == [artifact]
-    assert client.task.filter.await_args_list[1].args[0].workflow == ["generator-run", "artifact-generate"]
+    assert client.task.filter.await_args_list[1].args[0].workflow == [
+        "generator-run",
+        "artifact-generate",
+        "request_artifact_definitions_generate",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_artifact_poll_keeps_a_pending_definition_request_visible() -> None:
+    from tests.integration.test_e2e_pipeline import _execution_tasks
+
+    request = Mock(id="definition-request", branch=None, state="SCHEDULED")
+    client = Mock()
+    client.task.filter = AsyncMock(side_effect=[[], [request]])
+    assert await _execution_tasks(client, "scenario", set()) == [request]
 
 
 @pytest.mark.asyncio
@@ -560,3 +574,24 @@ async def test_scenario_isolation_retries_transient_reads_and_ignores_graphql_or
     )
     assert await _scenario_isolation_state(client, "main") == await _scenario_isolation_state(client, "main")
     assert client.execute_graphql.await_count == 3
+
+
+def test_artifact_definition_is_ready_only_when_all_of_its_outputs_are_stored() -> None:
+    from tests.integration.test_e2e_pipeline import _ready_artifact_names
+
+    def artifact(name: str, status: str = "Ready", storage: str | None = "stored") -> SimpleNamespace:
+        return SimpleNamespace(
+            name=SimpleNamespace(value=name),
+            status=SimpleNamespace(value=status),
+            storage_id=SimpleNamespace(value=storage),
+        )
+
+    assert _ready_artifact_names(
+        [
+            artifact("complete"),
+            artifact("complete"),
+            artifact("partial"),
+            artifact("partial", "Pending"),
+            artifact("missing-storage", storage=None),
+        ]
+    ) == {"complete"}

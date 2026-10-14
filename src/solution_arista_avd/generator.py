@@ -1214,17 +1214,18 @@ class GeneratorMixin:
 
 async def check_all_racks_generated(client: InfrahubClient, fabric_id: str) -> bool:
     """Check if all racks across all non-fabric pods have generation_complete set to True."""
-    pods = await client.filters(kind="NetworkPod", parent__ids=[fabric_id])
-
-    for pod_node in pods:
-        pod = cast("NetworkPod", pod_node)
-        if hasattr(pod, "role") and pod.role.value == "fabric":
-            continue
-
-        racks = await client.filters(kind="LocationRack", pod__ids=[pod.id])
-        if not racks:
-            continue
-
+    pod_nodes = await client.filters(
+        kind="NetworkPod", parent__ids=[fabric_id], include=["role"], prefetch_relationships=False
+    )
+    pods = [cast("NetworkPod", node) for node in pod_nodes]
+    pod_ids = [pod.id for pod in pods if not hasattr(pod, "role") or pod.role.value != "fabric"]
+    if pod_ids:
+        racks = await client.filters(
+            kind="LocationRack",
+            pod__ids=pod_ids,
+            include=["name", "generation_complete"],
+            prefetch_relationships=False,
+        )
         for rack_node in racks:
             rack = cast("LocationRack", rack_node)
             if not rack.generation_complete.value:

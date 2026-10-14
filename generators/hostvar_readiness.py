@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .rack_hostvar_instances_query import RackHostvarInstancesQuery
 from .rack_hostvar_readiness_query import RackHostvarReadinessQuery, RackHostvarReadinessQueryDcimDeviceEdgesNode
 
 if TYPE_CHECKING:
@@ -37,3 +38,30 @@ async def fabric_devices_with_hostvars(
             return devices
         if not page.edges:
             raise ValueError("Device readiness query returned an empty page before its reported count")
+
+
+async def missing_hostvar_generator_instances(client: InfrahubClient, device_ids: list[str]) -> set[str]:
+    """Inherited files do not imply branch-local generator instances exist.
+
+    Initialize every fabric target on a fresh branch before narrowing later rack
+    regeneration to rack-local devices. GeneratorInstance is a local schema kind.
+    """
+    if not device_ids:
+        return set()
+    query = Path(__file__).with_name("rack_hostvar_instances.gql").read_text()
+    initialized = set()
+    offset = 0
+    while True:
+        response = await client.execute_graphql(
+            query=query, variables={"devices": device_ids, "offset": offset, "limit": 200}
+        )
+        page = RackHostvarInstancesQuery.model_validate(response).core_generator_instance
+        for edge in page.edges:
+            if edge.node is None or edge.node.object_.node is None or edge.node.object_.node.id is None:
+                raise ValueError("Hostvar generator instance has no target device")
+            initialized.add(edge.node.object_.node.id)
+        offset += len(page.edges)
+        if offset >= page.count:
+            return set(device_ids) - initialized
+        if not page.edges:
+            raise ValueError("Generator readiness query returned an empty page before its reported count")

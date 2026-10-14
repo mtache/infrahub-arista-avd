@@ -167,6 +167,7 @@ extensions:
         - name: anta_enabled
           label: ANTA Enabled
           kind: Boolean
+          branch: aware
           optional: true
           default_value: false
           description: "Generate ANTA test catalogs for this fabric's devices."

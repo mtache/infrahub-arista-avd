@@ -1247,3 +1247,36 @@ async def test_trigger_generator_tolerant_mode_propagates_non_timeout_errors() -
             timeout=300,
             tolerate_timeout=True,
         )
+
+
+@pytest.mark.parametrize("complete", [False, True])
+@pytest.mark.asyncio
+async def test_rack_readiness_groups_non_fabric_pods_and_reads_only_required_fields(complete: bool) -> None:
+    from solution_arista_avd.generator import check_all_racks_generated
+
+    def pod(identifier: str, role: str) -> SimpleNamespace:
+        return SimpleNamespace(id=identifier, role=SimpleNamespace(value=role))
+
+    client = MagicMock()
+    client.filters = AsyncMock(
+        side_effect=[
+            [pod("super-spines", "fabric"), pod("cpu", "cpu"), pod("storage", "storage")],
+            [SimpleNamespace(name=SimpleNamespace(value="rack"), generation_complete=SimpleNamespace(value=complete))],
+        ]
+    )
+    assert await check_all_racks_generated(client, "fabric") is complete
+    calls = client.filters.await_args_list
+    assert calls[1].kwargs["pod__ids"] == ["cpu", "storage"]
+    assert calls[0].kwargs["include"] == ["role"]
+    assert calls[1].kwargs["include"] == ["name", "generation_complete"]
+    assert all(call.kwargs["prefetch_relationships"] is False for call in calls)
+
+
+@pytest.mark.asyncio
+async def test_no_non_fabric_pod_never_queries_racks_with_an_empty_filter() -> None:
+    from solution_arista_avd.generator import check_all_racks_generated
+
+    client = MagicMock()
+    client.filters = AsyncMock(return_value=[])
+    assert await check_all_racks_generated(client, "fabric") is True
+    assert client.filters.await_count == 1

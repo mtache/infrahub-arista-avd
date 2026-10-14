@@ -23,9 +23,11 @@ the temporary default branch because Infrahub 1.11 requires that origin. The
 source graph is checked after each scenario. Artifact tests prepare their own
 definitions only when selected. They use the pipeline branch while it is open,
 or the temporary default branch after publication.
-The fabric's `anta_enabled` and `dci_pool` fields are agnostic. Scenario cleanup
-restores their initial values and deletes only its newly created DCI pool before
-checking the source snapshot. FileObjects use the file download endpoint with
+The fabric's `anta_enabled` flag is branch-aware. Its proposed-change scenario
+prepares a disabled destination before forking, enables the source, checks that
+the destination remains disabled, then restores the original baseline. The
+`dci_pool` field is agnostic; cleanup restores its initial value and deletes only
+the newly created DCI pool before checking the source snapshot. FileObjects use the file download endpoint with
 their branch; rendered artifact content uses the object-storage endpoint.
 
 ```bash
@@ -50,13 +52,17 @@ without touching built-in objects. Branch-aware nodes remain isolated throughout
 
 Idempotence still executes two passes for all racks, including `DC1_BORDER`, and
 two hostvar passes. Generator requests contain the complete target set. Readiness
+initializes branch-local hostvar instances even when files were inherited, then
+keeps later rack regeneration targeted. It
 observes new task IDs and their cascades, including generator/artifact tasks
 without branch metadata. Snapshot polling reads metadata; once settled,
 comparisons read actual storage contents, checksums and IP assignments.
 Storage downloads are cached per client and storage ID with at most two concurrent
 reads. The targeted artifact endpoint receives artifact IDs rather than device
 IDs. Rack snapshots paginate all collections, preserve both passes on disk, and
-show the divergent records on failure. Each artifact definition settles before
+show the divergent records on failure. Definitions already rendered by a merge
+are observed without generating them again. A definition is Ready only when all
+of its existing outputs are stored and Ready. Missing definitions settle before
 the next one is triggered. Transient reads have bounded retries and respect `Retry-After`; permanent
 GraphQL errors and failed tasks stop the test immediately. Mutations are never
 replayed by the read retry helper.

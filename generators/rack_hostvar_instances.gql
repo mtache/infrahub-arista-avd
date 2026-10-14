@@ -1,0 +1,11 @@
+query RackHostvarInstancesQuery($devices: [ID], $offset: Int, $limit: Int) {
+  CoreGeneratorInstance(
+    object__ids: $devices
+    definition__name__value: "generate-avd-device-hostvar"
+    offset: $offset
+    limit: $limit
+  ) {
+    count
+    edges { node { object { node { __typename id } } } }
+  }
+}

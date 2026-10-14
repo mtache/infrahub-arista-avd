@@ -187,6 +187,25 @@ class TestE2EPipeline(IntegrationStack):
                 f"Scenario {name} leaked into baseline"
             )
 
+    @pytest_asyncio.fixture(loop_scope="class")
+    async def anta_scenario_branch(self, pipeline_published: str, client: InfrahubClient):
+        # A proposed change compares with the destination's current value.
+        # Prepare a disabled destination before forking, then restore the exact
+        # published baseline after the scenario. Other tests retain enabled ANTA.
+        original = await _scenario_isolation_state(client, pipeline_published)
+        fabric = await client.get(
+            kind="NetworkFabric", name__value=PROPOSED_CHANGE_ANTA_FABRIC, branch=pipeline_published
+        )
+        fabric.anta_enabled.value = False
+        try:
+            await fabric.save()
+            yield await create_branch(client, "proposed-change-anta-refresh", pipeline_published)
+        finally:
+            await _restore_shared_fabric_fields(client, pipeline_published, original)
+            assert await _scenario_isolation_state(client, pipeline_published) == original, (
+                "ANTA scenario leaked into baseline"
+            )
+
     @staticmethod
     def _address(infrahub_port: int) -> str:
         return f"http://localhost:{infrahub_port}"
@@ -710,8 +729,18 @@ class TestE2EPipeline(IntegrationStack):
         """Every AVD artifact definition yields at least one Ready artifact on the branch (FR-011/FR-013)."""
         definitions = await client.all(kind="CoreArtifactDefinition", branch=branch)
         assert definitions, "no artifact definitions registered (repository sync incomplete?)"
-        previous_tasks = {task.id for task in await _pipeline_tasks(client, branch)}
-        await _trigger_all_artifacts(client, branch, definitions)
+        tasks = await _pipeline_tasks(client, branch)
+        # A merge already renders the published baseline. Observe that execution
+        # before generating only definitions which still have no Ready output.
+        previous_tasks = {task.id for task in tasks if task.state == "COMPLETED"}
+        if any(task.state != "COMPLETED" for task in tasks):
+            await _wait_for_tasks(client, branch, previous_tasks)
+        existing = await client.all(kind="CoreArtifact", branch=branch, prefetch_relationships=False)
+        failed = [a.name.value for a in existing if a.status.value == "Error"]
+        assert not failed, f"Artifact generation failed: {failed}"
+        ready_names = _ready_artifact_names(existing)
+        missing = [d for d in definitions if d.artifact_name.value not in ready_names]
+        await _trigger_all_artifacts(client, branch, missing)
 
         started = time.monotonic()
         retriggered = False
@@ -720,11 +749,11 @@ class TestE2EPipeline(IntegrationStack):
         async def artifact_state() -> tuple[list[str], bool]:
             nonlocal quiet
             tasks = await _execution_tasks(client, branch, previous_tasks)
-            quiet = quiet + 1 if tasks and all(task.state == "COMPLETED" for task in tasks) else 0
+            quiet = quiet + 1 if (tasks or not missing) and all(task.state == "COMPLETED" for task in tasks) else 0
             artifacts = await client.all(kind="CoreArtifact", branch=branch, prefetch_relationships=False)
             failed = [a.name.value for a in artifacts if a.status.value == "Error"]
             assert not failed, f"Artifact generation failed: {failed}"
-            ready = {a.name.value for a in artifacts if a.status.value == "Ready"}
+            ready = _ready_artifact_names(artifacts)
             return sorted(set(ALL_ARTIFACT_NAMES) - ready), quiet >= 2
 
         async def retry_missing(state: tuple[list[str], bool]) -> None:
@@ -789,9 +818,10 @@ class TestE2EPipeline(IntegrationStack):
     # --- Component 14: proposed-change ANTA refresh -----------------------
     @pytest.mark.asyncio(loop_scope="class")
     async def test_proposed_change_refreshes_anta_catalogs_for_fabric_flag(
-        self, client: InfrahubClient, scenario_branch: str
+        self, client: InfrahubClient, anta_scenario_branch: str
     ) -> None:
         """Enabling ANTA on a generated fabric refreshes its device catalogs in the proposed change."""
+        scenario_branch = anta_scenario_branch
         fabric = await client.get(
             kind="NetworkFabric",
             name__value=PROPOSED_CHANGE_ANTA_FABRIC,
@@ -840,6 +870,10 @@ class TestE2EPipeline(IntegrationStack):
         previous_tasks = {task.id for task in await _pipeline_tasks(client, scenario_branch)}
         fabric.anta_enabled.value = True
         await fabric.save()
+        destination = await client.get(
+            kind="NetworkFabric", name__value=PROPOSED_CHANGE_ANTA_FABRIC, branch="main", include=["anta_enabled"]
+        )
+        assert destination.anta_enabled.value is False, "ANTA enable leaked into proposed-change destination"
         proposed_change = await client.create(
             kind="CoreProposedChange",
             data={
@@ -921,7 +955,7 @@ async def _scenario_isolation_state(client: InfrahubClient, branch: str) -> dict
 
 
 async def _restore_shared_fabric_fields(client: InfrahubClient, branch: str, original: dict) -> None:
-    """Restore the two agnostic fabric fields explicitly mutated by scenarios."""
+    """Restore prepared baseline flags and the shared DCI field after scenarios."""
     current = await _scenario_isolation_state(client, branch)
     actual = {edge["node"]["id"]: edge["node"] for edge in current["NetworkFabric"]["edges"]}
     for edge in original["NetworkFabric"]["edges"]:
@@ -1937,7 +1971,10 @@ async def _pipeline_tasks(client: InfrahubClient, branch: str) -> list:
     """
     branch_tasks, background_tasks = await asyncio.gather(
         _task_pages(client, TaskFilter(branch=branch)),
-        _task_pages(client, TaskFilter(workflow=["generator-run", "artifact-generate"])),
+        _task_pages(
+            client,
+            TaskFilter(workflow=["generator-run", "artifact-generate", "request_artifact_definitions_generate"]),
+        ),
     )
     tasks = {task.id: task for task in branch_tasks}
     tasks.update({task.id: task for task in background_tasks if task.branch is None})
@@ -2045,6 +2082,17 @@ async def _trigger_all_artifacts(client: InfrahubClient, branch: str, definition
         )
         resp.raise_for_status()
         await _wait_for_tasks(client, branch, before)
+
+
+def _ready_artifact_names(artifacts: list) -> set[str]:
+    """A definition is complete only if every existing output is stored and Ready."""
+    ready = {artifact.name.value for artifact in artifacts}
+    ready.difference_update(
+        artifact.name.value
+        for artifact in artifacts
+        if artifact.status.value != "Ready" or not artifact.storage_id.value
+    )
+    return ready
 
 
 async def _artifact_ids_for_targets(client: InfrahubClient, branch: str, name: str, targets: set[str]) -> list[str]:

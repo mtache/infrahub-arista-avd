@@ -574,9 +574,41 @@ async def test_hostvar_target_device_ids_uses_rack_targets_when_fabric_hostvars_
     gen.leaf_switches = [_named_device("leaf-a", "leaf-a")]
     gen.l2leaf_switches = []
     gen.spine_switches = [_named_device("spine-a", "spine-a")]
-    gen.client.execute_graphql = AsyncMock(return_value=_hostvar_readiness_response(missing=set()))
+    gen.client.execute_graphql = AsyncMock(
+        side_effect=[_hostvar_readiness_response(missing=set()), _hostvar_instance_response()]
+    )
     assert await gen.hostvar_target_device_ids() == ["leaf-a", "spine-a"]
-    assert gen.client.execute_graphql.await_count == 1
+    assert gen.client.execute_graphql.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_inherited_hostvars_require_full_branch_initialization_then_targeted_reruns() -> None:
+    gen = _make_generator()
+    gen.leaf_switches = [_named_device("leaf-a", "leaf-a")]
+    gen.l2leaf_switches = []
+    gen.spine_switches = [_named_device("spine-a", "spine-a")]
+    gen.client.execute_graphql = AsyncMock(
+        side_effect=[
+            _hostvar_readiness_response(missing=set()),
+            {"CoreGeneratorInstance": {"count": 0, "edges": []}},
+            _hostvar_readiness_response(missing=set()),
+            _hostvar_instance_response(),
+        ]
+    )
+    assert await gen.hostvar_target_device_ids() == ["super-spine", "spine-a", "leaf-a"]
+    assert await gen.hostvar_target_device_ids() == ["leaf-a", "spine-a"]
+
+
+def _hostvar_instance_response() -> dict:
+    return {
+        "CoreGeneratorInstance": {
+            "count": 3,
+            "edges": [
+                {"node": {"object": {"node": {"__typename": "DcimDevice", "id": name}}}}
+                for name in ("super-spine", "spine-a", "leaf-a")
+            ],
+        }
+    }
 
 
 def _hostvar_readiness_response(missing: set[str]) -> dict:

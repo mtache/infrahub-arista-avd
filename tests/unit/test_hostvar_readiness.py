@@ -8,7 +8,7 @@ import pytest
 from infrahub_sdk.exceptions import GraphQLError
 
 from generators import generate_avd_device_hostvar as hostvars
-from generators.hostvar_readiness import fabric_devices_with_hostvars
+from generators.hostvar_readiness import fabric_devices_with_hostvars, missing_hostvar_generator_instances
 
 
 def _device(name: str, *, ready: bool, rack_only: bool = False, fabric: str = "fabric") -> dict:
@@ -72,6 +72,32 @@ async def test_empty_page_before_count_does_not_mark_fabric_ready() -> None:
     client = Mock(execute_graphql=AsyncMock(return_value={"DcimDevice": {"count": 1, "edges": []}}))
     with pytest.raises(ValueError, match="empty page"):
         await fabric_devices_with_hostvars(client, "fabric")
+
+
+@pytest.mark.asyncio
+async def test_branch_local_hostvar_instances_are_paginated_and_missing_targets_remain_missing() -> None:
+    def page(target: str) -> dict:
+        return {
+            "CoreGeneratorInstance": {
+                "count": 2,
+                "edges": [{"node": {"object": {"node": {"__typename": "DcimDevice", "id": target}}}}],
+            }
+        }
+
+    client = Mock(execute_graphql=AsyncMock(side_effect=[page("spine"), page("leaf")]))
+    assert await missing_hostvar_generator_instances(client, ["spine", "leaf", "missing"]) == {"missing"}
+    assert client.execute_graphql.await_args_list[1].kwargs["variables"]["offset"] == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_hostvar_instance_target_is_a_permanent_failure() -> None:
+    client = Mock(
+        execute_graphql=AsyncMock(
+            return_value={"CoreGeneratorInstance": {"count": 1, "edges": [{"node": {"object": {"node": None}}}]}}
+        )
+    )
+    with pytest.raises(ValueError, match="no target device"):
+        await missing_hostvar_generator_instances(client, ["leaf"])
 
 
 @pytest.mark.asyncio

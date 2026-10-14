@@ -50,7 +50,7 @@ from solution_arista_avd.protocols import (  # noqa: E402
 )
 
 from .asn import set_device_asn  # noqa: E402
-from .hostvar_readiness import fabric_devices_with_hostvars  # noqa: E402
+from .hostvar_readiness import fabric_devices_with_hostvars, missing_hostvar_generator_instances  # noqa: E402
 from .rack_generator_query import RackGeneratorQuery  # noqa: E402
 
 if TYPE_CHECKING:
@@ -478,6 +478,16 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
                 len(missing_hostvars),
             )
             return self.device_ids(fabric_devices)
+
+        device_ids = self.device_ids(fabric_devices)
+        missing_instances = await missing_hostvar_generator_instances(self.client, device_ids)
+        if missing_instances:
+            self.logger.info(
+                "Initializing branch-local hostvar generation for fabric %s (%s missing targets)",
+                self.fabric.id,
+                len(missing_instances),
+            )
+            return device_ids
 
         return self.rack_hostvar_target_device_ids()
 
