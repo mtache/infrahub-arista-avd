@@ -66,6 +66,7 @@ from .helpers import (
     expected_super_spine_count,
     fabric_deployment_report,
     read_with_retry,
+    retry_after_delay,
     storage_content,
     wait_until,
 )
@@ -2242,11 +2243,18 @@ async def _trigger_all_artifacts(client: InfrahubClient, branch: str, definition
     """
     for definition in definitions:
         before = {task.id for task in await _pipeline_tasks(client, branch)}
-        resp = await client._post(
-            f"{client.address}/api/artifact/generate/{definition.id}?branch={branch}",
-            payload={"nodes": []},
-        )
-        resp.raise_for_status()
+        async with asyncio.timeout(ARTIFACT_TIMEOUT):
+            for attempt in range(4):
+                resp = await client._post(
+                    f"{client.address}/api/artifact/generate/{definition.id}?branch={branch}",
+                    payload={"nodes": []},
+                )
+                # This marker guarantees admission rejected the request before
+                # its handler ran. An unmarked 429 or lost response is not replayed.
+                if resp.status_code != 429 or resp.headers.get("X-Infrahub-Admission") != "shed" or attempt == 3:
+                    resp.raise_for_status()
+                    break
+                await asyncio.sleep(retry_after_delay(resp, 4 * 2**attempt))
         await _wait_for_tasks(client, branch, before)
 
 

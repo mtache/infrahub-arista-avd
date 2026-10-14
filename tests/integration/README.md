@@ -73,6 +73,9 @@ of its existing outputs are stored and Ready. Missing definitions settle before
 the next one is triggered. Transient reads have bounded retries and respect `Retry-After`; permanent
 GraphQL errors and failed tasks stop the test immediately. Mutations are never
 replayed by the read retry helper.
+Artifact POSTs retry only an explicit `X-Infrahub-Admission: shed` rejection,
+which guarantees that the handler did not run. These attempts respect `Retry-After`
+and a deadline; unmarked errors and lost responses fail without replay.
 
 Each container fixture writes `instance.log`, `tasks.json`, failed-task logs and
 any diagnostic error beneath its temporary directory before teardown. Preserve

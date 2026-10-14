@@ -154,18 +154,13 @@ async def read_with_retry[T](fetch: Callable[[], Awaitable[T]]) -> T:
 
 async def _retry_read[T](fetch: Callable[[], Awaitable[T]]) -> T:
     for attempt in range(4):
-        delay = 4 * 2**attempt
+        delay: float = 4 * 2**attempt
         try:
             return await fetch()
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code not in {429, 502, 503, 504} or attempt == 3:
                 raise
-            retry_after = exc.response.headers.get("Retry-After")
-            if retry_after:
-                try:
-                    delay = max(delay, float(retry_after))
-                except ValueError:
-                    delay = max(delay, (parsedate_to_datetime(retry_after) - datetime.now(UTC)).total_seconds())
+            delay = retry_after_delay(exc.response, delay)
         except httpx.TransportError, ServerNotReachableError, ServerNotResponsiveError:
             if attempt == 3:
                 raise
@@ -177,6 +172,17 @@ async def _retry_read[T](fetch: Callable[[], Awaitable[T]]) -> T:
                 raise
         await asyncio.sleep(delay)
     raise AssertionError("unreachable")
+
+
+def retry_after_delay(response: httpx.Response, minimum: float) -> float:
+    """Respect Retry-After seconds or date, with a minimum backoff."""
+    retry_after = response.headers.get("Retry-After")
+    if not retry_after:
+        return minimum
+    try:
+        return max(minimum, float(retry_after))
+    except ValueError:
+        return max(minimum, (parsedate_to_datetime(retry_after) - datetime.now(UTC)).total_seconds())
 
 
 _storage_caches: WeakKeyDictionary = WeakKeyDictionary()

@@ -828,6 +828,80 @@ async def test_artifact_definitions_settle_before_the_next_definition(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_artifact_generation_retries_only_explicit_admission_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.integration import test_e2e_pipeline as pipeline
+
+    request = httpx.Request("POST", "http://test/generate")
+    rejected = httpx.Response(429, headers={"X-Infrahub-Admission": "shed", "Retry-After": "7"}, request=request)
+    client = Mock(address="http://test")
+    client._post = AsyncMock(side_effect=[rejected, httpx.Response(200, request=request)])
+    sleep = AsyncMock()
+    settled = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(pipeline, "_pipeline_tasks", AsyncMock(return_value=[Mock(id="old")]))
+    monkeypatch.setattr(pipeline, "_wait_for_tasks", settled)
+
+    await pipeline._trigger_all_artifacts(client, "scenario", [Mock(id="definition")])
+
+    assert client._post.await_count == 2
+    sleep.assert_awaited_once_with(7)
+    settled.assert_awaited_once_with(client, "scenario", {"old"})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["unmarked-429", "permanent", "lost-response", "repeated-shed"])
+async def test_artifact_generation_does_not_replay_ambiguous_errors(
+    monkeypatch: pytest.MonkeyPatch, outcome: str
+) -> None:
+    from tests.integration import test_e2e_pipeline as pipeline
+
+    request = httpx.Request("POST", "http://test/generate")
+    client = Mock(address="http://test")
+    headers = {"X-Infrahub-Admission": "shed"} if outcome == "repeated-shed" else {}
+    response = httpx.Response(400 if outcome == "permanent" else 429, headers=headers, request=request)
+    client._post = AsyncMock(return_value=response)
+    error = httpx.HTTPStatusError
+    if outcome == "lost-response":
+        client._post.side_effect = httpx.ReadTimeout("lost response", request=request)
+        error = httpx.ReadTimeout
+    sleep = AsyncMock()
+    settled = AsyncMock()
+    monkeypatch.setattr(asyncio, "sleep", sleep)
+    monkeypatch.setattr(pipeline, "_pipeline_tasks", AsyncMock(return_value=[Mock(id="old")]))
+    monkeypatch.setattr(pipeline, "_wait_for_tasks", settled)
+
+    with pytest.raises(error):
+        await pipeline._trigger_all_artifacts(client, "scenario", [Mock(id="definition")])
+
+    assert client._post.await_count == (4 if outcome == "repeated-shed" else 1)
+    assert sleep.await_count == (3 if outcome == "repeated-shed" else 0)
+    settled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_artifact_admission_retry_after_stays_within_its_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    from tests.integration import test_e2e_pipeline as pipeline
+
+    request = httpx.Request("POST", "http://test/generate")
+    client = Mock(address="http://test")
+    client._post = AsyncMock(
+        return_value=httpx.Response(
+            429, headers={"X-Infrahub-Admission": "shed", "Retry-After": "999"}, request=request
+        )
+    )
+    settled = AsyncMock()
+    monkeypatch.setattr(pipeline, "ARTIFACT_TIMEOUT", 0.01)
+    monkeypatch.setattr(pipeline, "_pipeline_tasks", AsyncMock(return_value=[Mock(id="old")]))
+    monkeypatch.setattr(pipeline, "_wait_for_tasks", settled)
+
+    with pytest.raises(TimeoutError):
+        await pipeline._trigger_all_artifacts(client, "scenario", [Mock(id="definition")])
+
+    client._post.assert_awaited_once()
+    settled.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_scenario_isolation_retries_transient_reads_and_ignores_graphql_order() -> None:
     from tests.integration.test_e2e_pipeline import _scenario_isolation_state
 
