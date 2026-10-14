@@ -1547,6 +1547,16 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
         "physical_interface_ip_assignments": _normalize_physical_interface_ip_assignments(
             resp["InterfacePhysical"]["edges"]
         ),
+        # Include ports without an IP as well: tracking cleanup must not delete
+        # or recreate a topology-owned interface on the unchanged second pass.
+        "physical_interfaces": sorted(
+            (
+                edge["node"]["device"]["node"]["name"]["value"],
+                edge["node"]["name"]["value"],
+                edge["node"]["id"],
+            )
+            for edge in resp["InterfacePhysical"]["edges"]
+        ),
         "structured_config_files": structured_config_files,
         "structured_config_ethernet_ip_refs": structured_config_ethernet_ip_refs,
     }
