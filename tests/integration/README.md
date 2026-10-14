@@ -6,9 +6,11 @@ verify the committed SHA and locked dependencies, and build a branch-specific
 image. Run stacks serially with the CI resource settings, including one Prefect
 background service replica. Dependency sync and image builds precede pytest.
 
-The suite retains 53 scenarios, including eleven seed selections and the optional
-fabric scenario (skipped without `--fabric`). The performance target is less than
-1,800 seconds for pytest including startup and teardown. Working budgets are
+The suite retains 53 scenarios, including eleven seed selections and a default
+L2LS deployment scenario. It checks generated roles, MLAG on both tiers and pure
+Layer-2 EOS configurations, sharing the E2E class's stack and artifacts. The
+performance target is less than 1,800 seconds for pytest including startup and
+teardown. Working budgets are
 13 minutes for seeds, 12 minutes for E2E and five minutes for the remaining tests.
 
 ## Targeted runs
@@ -44,6 +46,15 @@ uv run --no-sync pytest \
 Use a fresh external temporary directory per invocation. Rerun only the affected
 lot while investigating; run the complete suite after all affected lots pass.
 Test two E2E nodes separately and in reversed order before the complete gate.
+
+Select the L2LS deployment check directly without a fabric option:
+
+```bash
+uv run --no-sync pytest \
+  tests/integration/test_e2e_pipeline.py::TestE2EPipeline::test_l2ls_deployment \
+  -v --capture=tee-sys --durations=0 --durations-min=0 \
+  --basetemp=/tmp/infrahub-it-l2ls-new --junitxml=/tmp/infrahub-it-l2ls-junit.xml
+```
 
 ## Coverage and evidence
 

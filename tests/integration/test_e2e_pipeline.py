@@ -52,7 +52,6 @@ from .helpers import (
     ARTIFACT_AVD_EOS_CONFIG,
     ARTIFACT_CONTAINERLAB_TOPOLOGY,
     ARTIFACT_TIMEOUT,
-    FABRIC_EXPECTED_ROLES,
     GENERATOR_FABRIC,
     GENERATOR_RACK,
     GENERATOR_TIMEOUT,
@@ -933,45 +932,36 @@ class TestE2EPipeline(IntegrationStack):
         )
         assert set(device_ids_by_name) <= set(refreshed)
 
-    # --- Fabric-scoped deployment validation (US4 / `--fabric` selector) ----
+    # --- Standalone L2LS deployment validation ---------------------------
     @pytest.mark.usefixtures("artifacts_ready")
     @pytest.mark.asyncio(loop_scope="class")
-    async def test_selected_fabric_deployment(
-        self, client: InfrahubClient, target_fabric: str | None, artifacts_ready: str
-    ) -> None:
-        """Validate one fabric's deployment when selected via ``--fabric``.
+    async def test_l2ls_deployment(self, client: InfrahubClient, artifacts_ready: str) -> None:
+        """Validate L2LS roles, both MLAG tiers and pure Layer-2 EOS by default.
 
-        With no ``--fabric`` this skips, so the default suite is unchanged
-        (FR-022). An unknown fabric fails fast (FR-023). For a known fabric it
-        asserts the design's expected device roles were generated; for the
-        standalone-L2LS design it also asserts MLAG on both tiers and that the
-        rendered EOS is pure Layer-2 (no VXLAN/BGP/EVPN).
+        Reuse the class's generated baseline and artifacts; no separate stack
+        or fabric selector is needed.
         """
-        if not target_fabric:
-            pytest.skip("no --fabric selector; pass --fabric <name> to validate a single fabric")
-
+        fabric_name = "Fabric-L2LS"
         report = await wait_until(
-            fetch=lambda: fabric_deployment_report(client, PIPELINE_BRANCH, target_fabric),
+            fetch=lambda: fabric_deployment_report(client, PIPELINE_BRANCH, fabric_name),
             ready=lambda r: r is None or r["device_count"] > 0,
             timeout=GENERATOR_TIMEOUT,
             interval=POLL_INTERVAL,
-            describe=f"generated devices for fabric {target_fabric!r}",
+            describe=f"generated devices for fabric {fabric_name!r}",
         )
-        assert report is not None, f"--fabric {target_fabric!r} not found on {PIPELINE_BRANCH}"
-        assert report["device_count"] > 0, f"fabric {target_fabric!r} generated no devices"
+        assert report is not None, f"{fabric_name!r} not found on {PIPELINE_BRANCH}"
+        assert report["device_count"] > 0, f"fabric {fabric_name!r} generated no devices"
 
-        expected_roles = FABRIC_EXPECTED_ROLES.get(target_fabric)
-        if expected_roles:
-            got_roles = set(report["roles"])
-            assert expected_roles <= got_roles, (
-                f"{target_fabric}: expected roles {sorted(expected_roles)}, got {sorted(got_roles)}"
-            )
+        expected_roles = {"l2spine", "l2leaf"}
+        got_roles = set(report["roles"])
+        assert expected_roles <= got_roles, (
+            f"{fabric_name}: expected roles {sorted(expected_roles)}, got {sorted(got_roles)}"
+        )
 
-        if target_fabric == "Fabric-L2LS":
-            assert report["mlag_roles"] >= L2LS_MLAG_ROLES, (
-                f"L2LS MLAG missing a tier: expected {sorted(L2LS_MLAG_ROLES)}, got {sorted(report['mlag_roles'])}"
-            )
-            await _assert_pure_layer2_configs(client, artifacts_ready, report["roles"])
+        assert report["mlag_roles"] >= L2LS_MLAG_ROLES, (
+            f"L2LS MLAG missing a tier: expected {sorted(L2LS_MLAG_ROLES)}, got {sorted(report['mlag_roles'])}"
+        )
+        await _assert_pure_layer2_configs(client, artifacts_ready, report["roles"])
 
 
 async def _scenario_isolation_state(client: InfrahubClient, branch: str) -> dict:
