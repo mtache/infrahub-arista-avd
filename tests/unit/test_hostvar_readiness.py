@@ -140,6 +140,7 @@ async def test_hostvar_file_marks_pending_only_when_it_will_change(
     monkeypatch.setattr(hostvars, "check_fabric_hostvars_ready", ready)
     await generator._store_hostvars(fabric_id="fabric", device_id="device", hostname="leaf-1", hostvars=content)
     ready.assert_awaited_once_with(generator.client, "fabric")
+    artifact.hostvar_file.fetch.assert_not_awaited()
     if stored == "same":
         assert events == []
         flag.assert_not_awaited()

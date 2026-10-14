@@ -2560,7 +2560,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         existing_checksum = None
         if avd_artifact.hostvar_file.id:
             try:
-                await avd_artifact.hostvar_file.fetch()
+                # include=["hostvar_file"] already hydrates the file peer.
                 existing_file = avd_artifact.hostvar_file.peer
                 if existing_file:
                     existing_content = await existing_file.download_file()
