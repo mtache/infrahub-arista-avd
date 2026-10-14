@@ -108,9 +108,10 @@ async def test_permanent_read_error_is_not_hidden_as_pending() -> None:
 
 
 @pytest.mark.parametrize("stored", ["same", "changed", "missing"])
+@pytest.mark.parametrize("metadata", [False, True])
 @pytest.mark.asyncio
 async def test_hostvar_file_marks_pending_only_when_it_will_change(
-    monkeypatch: pytest.MonkeyPatch, stored: str
+    monkeypatch: pytest.MonkeyPatch, stored: str, metadata: bool
 ) -> None:
     content = {"hostname": "leaf-1"}
     events = []
@@ -127,6 +128,8 @@ async def test_hostvar_file_marks_pending_only_when_it_will_change(
     file.download_file = AsyncMock(
         return_value=json.dumps(content if stored == "same" else {"hostname": "old"}, indent=2).encode()
     )
+    if metadata:
+        file.checksum = SimpleNamespace(value=hostvars.file_content_checksum(file.download_file.return_value))
     artifact = SimpleNamespace(
         save=AsyncMock(),
         hostvar_file=SimpleNamespace(id="file" if stored != "missing" else None, peer=file, fetch=AsyncMock()),
@@ -141,6 +144,8 @@ async def test_hostvar_file_marks_pending_only_when_it_will_change(
     await generator._store_hostvars(fabric_id="fabric", device_id="device", hostname="leaf-1", hostvars=content)
     ready.assert_awaited_once_with(generator.client, "fabric")
     artifact.hostvar_file.fetch.assert_not_awaited()
+    if metadata:
+        file.download_file.assert_not_awaited()
     if stored == "same":
         assert events == []
         flag.assert_not_awaited()

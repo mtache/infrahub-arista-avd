@@ -14,7 +14,7 @@ from typing import Any, cast
 from infrahub_sdk.generator import InfrahubGenerator
 from pyavd import get_avd_facts, get_device_structured_config, validate_inputs
 
-from solution_arista_avd.generator import save_file_if_changed
+from solution_arista_avd.generator import file_content_checksum, save_file_if_changed, stored_file_checksum
 from solution_arista_avd.protocols import AvdArtifact, AvdStructuredConfigFile
 
 from .generate_avd_inputs_query import GenerateAvdInputsQuery
@@ -244,8 +244,6 @@ class AvdDeviceStructuredConfigGenerator(InfrahubGenerator):
             self.logger.exception("AVD facts generation failed")
             return
 
-        import hashlib
-
         success_count = 0
         skipped_count = 0
         failed_devices: list[str] = []
@@ -259,7 +257,7 @@ class AvdDeviceStructuredConfigGenerator(InfrahubGenerator):
                 )
 
                 new_content = json.dumps(structured_config_dict, indent=2, sort_keys=True).encode()
-                new_checksum = hashlib.sha256(new_content).hexdigest()
+                new_checksum = file_content_checksum(new_content)
 
                 avd_artifact = self._artifacts_by_hostname[hostname]
 
@@ -270,8 +268,7 @@ class AvdDeviceStructuredConfigGenerator(InfrahubGenerator):
                     try:
                         existing_file = avd_artifact.structured_config_file.peer
                         if existing_file:
-                            existing_content = await existing_file.download_file()
-                            existing_checksum = hashlib.sha256(existing_content).hexdigest()
+                            existing_checksum = await stored_file_checksum(existing_file)
                     except Exception as exc:  # noqa: BLE001 - treat any fetch/download failure as "no existing file"
                         self.logger.warning(
                             "Could not read existing structured config for %s, forcing re-upload: %s",

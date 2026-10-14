@@ -249,6 +249,10 @@ The readiness helper emits `True` only when the fabric was not already ready,
 so repeated checks preserve the trigger's transition without scheduling another
 whole-fabric structured configuration run.
 
+Hostvar and structured-config writes compare the new content with Infrahub's
+SHA-1 file checksum metadata. Files without valid checksum metadata are read
+before comparison; unchanged files retain their IDs and storage objects.
+
 ### ServerCablingGenerator
 
 **File**: `generators/generate_server_cabling.py`
@@ -294,6 +298,12 @@ the ownership of the device/template generator.
 prefix lists, route maps, and static routes.
 
 **Query**: `backfill_structured_config.gql`
+
+IP candidates and their primary interface assignments are read together for
+each calculation. Conflict checks cover both `DcimInterface.ip_address` and
+the separate `InterfaceLayer3.ip_addresses` inverse relation, and unchanged
+primary assignments require no interface write. These reads are refreshed on
+every generator run.
 
 This generator runs in the opposite direction to the rest of the chain: everything else turns intent
 into AVD inputs, while the backfill turns AVD's derived output into queryable objects. Those objects

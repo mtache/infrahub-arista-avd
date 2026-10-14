@@ -9,8 +9,10 @@ from infrahub_sdk.exceptions import ServerNotResponsiveError
 
 from solution_arista_avd.generator import (
     GeneratorMixin,
+    file_content_checksum,
     save_file_if_changed,
     set_fabric_avd_hostvars_ready,
+    stored_file_checksum,
     trigger_hostvar_generation,
 )
 from solution_arista_avd.pool_roles import ResourceRole
@@ -26,6 +28,17 @@ def _make_generator() -> GeneratorMixin:
     gen.client.group_context.get_group = AsyncMock(return_value=None)
     gen.client.group_context.add_related_nodes = AsyncMock()
     return gen
+
+
+@pytest.mark.parametrize("metadata", [None, "", "invalid", "0" * 64, "xyz" * 13 + "z"])
+@pytest.mark.asyncio
+async def test_file_checksum_fallback_matches_infrahub_upload_algorithm(metadata: str | None) -> None:
+    from infrahub_sdk.file_handler import sha1_of_source
+
+    content = b'{"hostname": "leaf"}'
+    file = SimpleNamespace(checksum=SimpleNamespace(value=metadata), download_file=AsyncMock(return_value=content))
+    assert await stored_file_checksum(file) == sha1_of_source(content) == file_content_checksum(content)
+    file.download_file.assert_awaited_once()
 
 
 @pytest.mark.parametrize("initial_ready", [False, True])

@@ -441,7 +441,7 @@ query GenerateAvdDeviceInputsQuery($name: String!) {
                                     node_id {
                                       value
                                     }
-                                    interfaces {
+                                    interfaces(role__values: ["spine", "super_spine"]) {
                                       edges {
                                         node {
                                           __typename

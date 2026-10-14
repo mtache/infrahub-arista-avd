@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import operator
@@ -53,8 +52,10 @@ from solution_arista_avd.avd import (  # noqa: E402
 from solution_arista_avd.avd import get_avd_type as _get_package_avd_type  # noqa: E402
 from solution_arista_avd.generator import (  # noqa: E402
     fetch_allocated_prefixes,
+    file_content_checksum,
     save_file_if_changed,
     set_fabric_avd_hostvars_ready,
+    stored_file_checksum,
 )
 from solution_arista_avd.pool_roles import (  # noqa: E402
     FABRIC_SUPERNET_PREFIX_LENGTHS,
@@ -2626,7 +2627,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
     async def _store_hostvars(self, *, fabric_id: str, device_id: str, hostname: str, hostvars: dict[str, Any]) -> None:
         """Reconcile the file, marking the fabric pending only when content changes."""
         new_content = json.dumps(hostvars, indent=2).encode()
-        new_checksum = hashlib.sha256(new_content).hexdigest()
+        new_checksum = file_content_checksum(new_content)
 
         artifact_name = hostname
 
@@ -2650,8 +2651,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
                 # include=["hostvar_file"] already hydrates the file peer.
                 existing_file = avd_artifact.hostvar_file.peer
                 if existing_file:
-                    existing_content = await existing_file.download_file()
-                    existing_checksum = hashlib.sha256(existing_content).hexdigest()
+                    existing_checksum = await stored_file_checksum(existing_file)
             except Exception as exc:  # noqa: BLE001 - treat any fetch/download failure as "no existing file"
                 self.logger.warning("Could not read existing hostvar file for %s, forcing re-upload: %s", hostname, exc)
                 existing_file = None

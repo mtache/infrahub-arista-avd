@@ -8,6 +8,7 @@ come from device relationships, and the MLAG pools stay optional.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -446,6 +447,50 @@ def test_derive_uplink_pool_reservation_uses_widest_fabric_fanout() -> None:
         "max_uplink_switches": 4,
         "max_parallel_uplinks": None,
     }
+
+
+@pytest.mark.parametrize("underlay", ["ebgp", "ospf", "none"])
+def test_uplink_query_filter_preserves_widest_fanout_parallel_links_and_node_ids(underlay: str) -> None:
+    devices = [
+        _fabric_device("spine", "spine", 1, [("Ethernet1", "super1", "Ethernet1")]),
+        _fabric_device(
+            "border",
+            "border_leaf",
+            2,
+            [("Ethernet1", "spine", "Ethernet2"), ("Ethernet2", "spine", "Ethernet3")],
+        ),
+        _fabric_device("pe", "pe", 3, [("Ethernet1", "p1", "Ethernet1"), ("Ethernet2", "p2", "Ethernet1")]),
+        _fabric_device("access", "l2leaf", None, []),
+    ]
+    for device in devices:
+        device["interfaces"]["edges"].extend(
+            _edge(_uplink_interface(f"Ethernet{number}", role, "endpoint", "Ethernet1"))
+            for number, role in enumerate(("server", "mlag_peer", "leaf", "super_spine"), 10)
+        )
+    full = _fabric_with_devices([])
+    full["children"] = {
+        "edges": [_edge({"__typename": "NetworkPod", "devices": {"edges": [_edge(d) for d in devices]}})]
+    }
+    filtered = deepcopy(full)
+    for device in filtered["children"]["edges"][0]["node"]["devices"]["edges"]:
+        device["node"]["interfaces"]["edges"] = [
+            edge
+            for edge in device["node"]["interfaces"]["edges"]
+            if edge["node"]["role"]["value"] in {"spine", "super_spine"}
+        ]
+    derive = GenerateAVDDeviceHostvar._derive_uplink_pool_reservation
+    assert (
+        derive(full, fabric_underlay=underlay)
+        == derive(filtered, fabric_underlay=underlay)
+        == {
+            "max_uplink_switches": 2,
+            "max_parallel_uplinks": 2,
+        }
+    )
+    # Filtering ports must not bypass the shared pool's node-ID conflict check.
+    filtered["children"]["edges"][0]["node"]["devices"]["edges"][2]["node"]["node_id"]["value"] = 2
+    with pytest.raises(ValueError, match="both use node_id 2"):
+        derive(filtered, fabric_underlay=underlay)
 
 
 def test_derive_uplink_pool_reservation_detects_parallel_uplinks() -> None:

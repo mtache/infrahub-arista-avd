@@ -35,6 +35,19 @@ AVD_DEVICES_GROUP = "avd_devices"
 VTEP_LOOPBACK_ROLES = {"leaf", "border_leaf"}
 
 
+def file_content_checksum(content: bytes) -> str:
+    """Match Infrahub's CoreFileObject checksum for content reconciliation."""
+    return hashlib.sha1(content, usedforsecurity=False).hexdigest()
+
+
+async def stored_file_checksum(file: Any) -> str:
+    """Use current file metadata; download only when it lacks a valid checksum."""
+    checksum = getattr(getattr(file, "checksum", None), "value", None)
+    if isinstance(checksum, str) and len(checksum) == 40 and all(c in "0123456789abcdef" for c in checksum):
+        return checksum
+    return file_content_checksum(await file.download_file())
+
+
 async def save_file_if_changed(
     *,
     existing_file: Any | None,

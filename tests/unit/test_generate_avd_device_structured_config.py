@@ -380,7 +380,10 @@ class TestFetchHostvarsFromStorage:
         assert result == {}
 
 
-async def test_two_generations_compare_complete_files_and_preserve_matching_configs() -> None:
+@pytest.mark.parametrize("metadata", [False, True])
+async def test_two_generations_compare_complete_files_and_preserve_matching_configs(metadata: bool) -> None:
+    from solution_arista_avd.generator import file_content_checksum
+
     gen = _make_generator()
     inputs = {
         "spine1": _underlay_hostvars(hostname="spine1", role="spine", node_id=1),
@@ -400,6 +403,10 @@ async def test_two_generations_compare_complete_files_and_preserve_matching_conf
         artifact.structured_config_file.peer.download_file = AsyncMock(
             return_value=json.dumps(config, indent=2, sort_keys=True).encode()
         )
+        if metadata:
+            artifact.structured_config_file.peer.checksum.value = file_content_checksum(
+                artifact.structured_config_file.peer.download_file.return_value
+            )
         artifact.structured_config_file.peer.save = AsyncMock()
         artifacts.append(artifact)
     gen.client.filters = AsyncMock(return_value=list(reversed(artifacts)))
@@ -420,7 +427,7 @@ async def test_two_generations_compare_complete_files_and_preserve_matching_conf
     assert gen.client.filters.await_count == 2
     for artifact in artifacts:
         assert artifact.hostvar_file.peer.download_file.await_count == 2
-        assert artifact.structured_config_file.peer.download_file.await_count == 2
+        assert artifact.structured_config_file.peer.download_file.await_count == (0 if metadata else 2)
         artifact.hostvar_file.fetch.assert_not_awaited()
         artifact.structured_config_file.fetch.assert_not_awaited()
         artifact.structured_config_file.peer.upload_from_bytes.assert_not_called()
