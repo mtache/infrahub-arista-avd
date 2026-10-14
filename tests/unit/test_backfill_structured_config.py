@@ -42,6 +42,7 @@ from generators.backfill_structured_config_query import (
 )
 from solution_arista_avd.protocols import (
     CoreAccountGroup,
+    DcimInterface,
     IpamIPAddress,
     IpamPrefix,
     RoutingBGPNeighbor,
@@ -363,6 +364,63 @@ class TestExtractOptional:
 
 
 class TestBackfillIp:
+    @pytest.mark.parametrize("assigned_id", ["iface-1", "iface-2"])
+    async def test_primary_ip_assignment_is_checked_without_legacy_inverse(self, assigned_id: str) -> None:
+        gen = _make_generator()
+        existing_ip = SimpleNamespace(id="ip-1", interface=None)
+        assigned = SimpleNamespace(id=assigned_id, name=SimpleNamespace(value="Ethernet2"))
+        gen.client.filters = AsyncMock(side_effect=[[existing_ip], [assigned]])
+        gen._interface_from_query = AsyncMock()
+        iface = _make_interface(iface_id="iface-1")
+        if assigned_id == "iface-1":
+            await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1")
+        else:
+            with pytest.raises(ValueError, match="already assigned to Ethernet2"):
+                await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1")
+        gen._interface_from_query.assert_not_awaited()
+        gen.client.create.assert_not_called()
+        gen.client.filters.assert_any_await(kind=DcimInterface, ip_address__ids=["ip-1"], include=["ip_address"])
+
+    async def test_primary_and_legacy_assignments_cannot_point_to_different_ports(self) -> None:
+        gen = _make_generator()
+        legacy = SimpleNamespace(id="legacy")
+        ip = SimpleNamespace(id="ip-1", interface=SimpleNamespace(peer=legacy))
+        gen._primary_ip_interfaces = {"ip-1": [SimpleNamespace(id="primary")]}
+        with pytest.raises(ValueError, match=r"assigned to multiple interfaces.*legacy.*primary"):
+            await gen._get_existing_ip_interface(ip)
+
+    async def test_grouped_ip_lookup_is_current_and_does_not_write_unchanged_primary_ips(self) -> None:
+        gen = _make_generator()
+        gen._interface_from_query = AsyncMock()
+        addresses = {"10.0.0.1/31", "10.0.0.3/31"}
+
+        def ip(identifier: str, address: str) -> SimpleNamespace:
+            return SimpleNamespace(id=identifier, address=SimpleNamespace(value=address), interface=None)
+
+        existing = [ip("ip-1", "10.0.0.1/31"), ip("ip-2", "10.0.0.3/31")]
+        interfaces = [
+            SimpleNamespace(id=f"iface-{number}", ip_address=SimpleNamespace(id=node.id))
+            for number, node in enumerate(existing, 1)
+        ]
+        gen.client.filters = AsyncMock(side_effect=[existing, interfaces, [], []])
+        await gen._prepare_ip_lookup(addresses)
+        await gen._backfill_ip(_make_interface(iface_id="iface-1"), "10.0.0.1/31", "leaf")
+        await gen._backfill_ip(_make_interface(iface_id="iface-2"), "10.0.0.3/31", "leaf")
+        assert gen.client.filters.await_count == 2
+        gen._interface_from_query.assert_not_awaited()
+        gen.client.create.assert_not_called()
+
+        # A second calculation must read current graph state, not reuse peers
+        # from the previous calculation after the intent or assignments change.
+        await gen._prepare_ip_lookup({"10.0.0.5/31"})
+        assert not gen._existing_ips and not gen._primary_ip_interfaces
+        gen.client.filters.assert_any_await(
+            kind=IpamIPAddress,
+            address__values=["10.0.0.5/31"],
+            ip_namespace__name__value="default",
+            include=["interface"],
+        )
+
     async def test_backfill_creates_prefix_ip_and_assigns(self) -> None:
         """Test that _backfill_ip creates prefix, IP, and assigns to interface."""
         gen = _make_generator()
@@ -445,7 +503,7 @@ class TestBackfillIp:
         existing_ip.interface = SimpleNamespace(
             peer=SimpleNamespace(id="iface-2", name=SimpleNamespace(value="Ethernet2"))
         )
-        gen.client.filters = AsyncMock(return_value=[existing_ip])
+        gen.client.filters = AsyncMock(side_effect=[[existing_ip], []])
         iface = _make_interface(iface_id="iface-1", name="Ethernet1", ip_node=None)
 
         with pytest.raises(ValueError, match=r"already assigned to Ethernet2 \(iface-2\).*Ethernet1 \(iface-1\)"):
@@ -460,7 +518,7 @@ class TestBackfillIp:
         existing_ip.interface = SimpleNamespace(
             peer=SimpleNamespace(id="iface-1", name=SimpleNamespace(value="Ethernet1"))
         )
-        gen.client.filters = AsyncMock(return_value=[existing_ip])
+        gen.client.filters = AsyncMock(side_effect=[[existing_ip], []])
         iface = _make_interface(iface_id="iface-1", name="Ethernet1", ip_node=None)
 
         await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1")
@@ -473,7 +531,7 @@ class TestBackfillIp:
         existing_ip = MagicMock()
         existing_ip.interface = None
         mock_interface = _make_saveable_mock()
-        gen.client.filters = AsyncMock(return_value=[existing_ip])
+        gen.client.filters = AsyncMock(side_effect=[[existing_ip], []])
         gen._interface_from_query = AsyncMock(return_value=mock_interface)
         iface = _make_interface(iface_id="iface-1", name="Ethernet1", ip_node=None)
 
@@ -489,7 +547,7 @@ class TestBackfillIp:
         interface_rel = _UninitializedRelatedNode()
         existing_ip.interface = interface_rel
         mock_interface = _make_saveable_mock()
-        gen.client.filters = AsyncMock(return_value=[existing_ip])
+        gen.client.filters = AsyncMock(side_effect=[[existing_ip], []])
         gen._interface_from_query = AsyncMock(return_value=mock_interface)
         iface = _make_interface(iface_id="iface-1", name="Ethernet1", ip_node=None)
 

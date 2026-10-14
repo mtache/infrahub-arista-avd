@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import logging
+from contextlib import suppress
 from typing import Any, cast
 
 from infrahub_sdk.exceptions import NodeNotFoundError
@@ -130,6 +131,25 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
         return "<unknown interface>"
 
     async def _get_existing_ip_interface(self, ip_address: Any) -> Any | None:
+        # The primary ip_address extension and InterfaceLayer3.ip_addresses
+        # have different relationship identifiers. Read both before assigning
+        # an existing IP; its legacy inverse alone misses primary assignments.
+        primary = getattr(self, "_primary_ip_interfaces", None)
+        if primary is None:
+            interfaces = await self.client.filters(
+                kind=DcimInterface, ip_address__ids=[ip_address.id], include=["ip_address"]
+            )
+        else:
+            interfaces = list(primary.get(ip_address.id, []))
+        inverse = await self._get_inverse_ip_interface(ip_address)
+        if inverse is not None:
+            interfaces.append(inverse)
+        by_id = {interface.id: interface for interface in interfaces}
+        if len(by_id) > 1:
+            raise ValueError(f"IP address {ip_address.id} is assigned to multiple interfaces: {sorted(by_id)}")
+        return next(iter(by_id.values()), None)
+
+    async def _get_inverse_ip_interface(self, ip_address: Any) -> Any | None:
         interface_rel = getattr(ip_address, "interface", None)
         if interface_rel is None:
             return None
@@ -152,6 +172,42 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
         if peers:
             return self._get_loaded_relationship_peer(peers[0])
         return None
+
+    async def _prepare_ip_lookup(self, addresses: set[str], namespace: str = DEFAULT_IP_NAMESPACE) -> None:
+        """Read current IPs and primary assignments once for this calculation."""
+        self._existing_ips: dict[tuple[str, str], list[Any]] = {}
+        self._primary_ip_interfaces: dict[str, list[Any]] = {}
+        if not addresses:
+            return
+        ips = await self.client.filters(
+            kind=IpamIPAddress,
+            address__values=sorted(addresses),
+            ip_namespace__name__value=namespace,
+            include=["interface"],
+        )
+        for node in ips:
+            self._existing_ips.setdefault((str(node.address.value), namespace), []).append(node)
+        if not ips:
+            return
+        interfaces = await self.client.filters(
+            kind=DcimInterface, ip_address__ids=[node.id for node in ips], include=["ip_address"]
+        )
+        for interface in interfaces:
+            self._primary_ip_interfaces.setdefault(interface.ip_address.id, []).append(interface)
+
+    @staticmethod
+    def _backfill_addresses(structured_config: dict, interface_names: set[str]) -> set[str]:
+        addresses = set()
+        for section in INTERFACE_SECTIONS:
+            for interface in structured_config.get(section, []):
+                name = interface.get("name")
+                if name not in interface_names or name in GENERATED_LOOPBACK_INTERFACES:
+                    continue
+                if interface.get("ip_address"):
+                    # _backfill_ip reports invalid values during processing.
+                    with suppress(ValueError):
+                        addresses.add(str(ipaddress.ip_interface(interface["ip_address"])))
+        return addresses
 
     @staticmethod
     def _get_loaded_relationship_peer(relationship: Any) -> Any | None:
@@ -192,10 +248,15 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
         prefix_str = str(network)
         address_str = str(ip_iface)
 
-        existing_ips = await self.client.filters(
-            kind=IpamIPAddress,
-            address__value=address_str,
-            ip_namespace__name__value=namespace,
+        existing = getattr(self, "_existing_ips", None)
+        existing_ips = (
+            existing.get((address_str, namespace), [])
+            if existing is not None
+            else await self.client.filters(
+                kind=IpamIPAddress,
+                address__value=address_str,
+                ip_namespace__name__value=namespace,
+            )
         )
         if len(existing_ips) > 1:
             raise ValueError(
@@ -218,6 +279,8 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
             interface = await self._interface_from_query(interface_node)
             interface.ip_address = existing_ip
             await interface.save(allow_upsert=True, update_group_context=False)
+            if getattr(self, "_primary_ip_interfaces", None) is not None:
+                self._primary_ip_interfaces.setdefault(existing_ip.id, []).append(interface)
             self.logger.info(f"[{hostname}] Assigned existing {address_str} to {iface_name}")
             return
 
@@ -244,6 +307,9 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
         interface = await self._interface_from_query(interface_node)
         interface.ip_address = ip_address
         await interface.save(allow_upsert=True, update_group_context=False)
+        if existing is not None:
+            self._existing_ips.setdefault((address_str, namespace), []).append(ip_address)
+            self._primary_ip_interfaces.setdefault(ip_address.id, []).append(interface)
         self.logger.info(f"[{hostname}] Assigned {ip_iface} to {iface_name}")
 
     async def _update_mtu(
@@ -539,6 +605,8 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
     async def generate(self, data: dict) -> None:
         """Backfill IPs, MTU, and routing config from structured config into the data model."""
         self._hydrated_interfaces = {}
+        self._existing_ips = None
+        self._primary_ip_interfaces = None
         data: BackfillStructuredConfigQuery = BackfillStructuredConfigQuery(**data)
         artifact = data.avd_artifact.edges[0].node
 
@@ -579,6 +647,7 @@ class BackfillStructuredConfigGenerator(InfrahubGenerator):
         # Build interface map from GraphQL data
         interfaces = [edge.node for edge in device.interfaces.edges if edge.node]
         interface_map = self._build_interface_map(interfaces)
+        await self._prepare_ip_lookup(self._backfill_addresses(structured_config, set(interface_map)))
 
         # Process each interface section
         for section in INTERFACE_SECTIONS:

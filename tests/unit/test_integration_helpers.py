@@ -315,6 +315,66 @@ async def test_rack_snapshot_requires_local_structured_instances_for_every_fabri
     assert second["ready"] and not second["missing_structured_targets"]
     assert len(second["state"]["generator_instances"]) == 3
 
+    metadata["InterfacePhysical"] = {
+        "edges": [
+            {
+                "node": {
+                    "id": "port",
+                    "device": {"node": {"name": {"value": "leaf"}}},
+                    "name": {"value": "Ethernet1"},
+                    "ip_address": {"node": {"id": "ip", "address": {"value": "10.0.0.1/31"}}},
+                    "ip_addresses": {"edges": []},
+                }
+            }
+        ]
+    }
+    monkeypatch.setattr(
+        pipeline,
+        "_structured_config_ethernet_ip_refs",
+        AsyncMock(return_value=[{"artifact": "leaf", "interface": "Ethernet1", "ip_address": "10.0.0.1/31"}]),
+    )
+    complete = await pipeline._rack_rerun_snapshot(Mock(), "scenario")
+    assert complete["state"]["physical_interface_ip_assignments"] == [
+        {"device": "leaf", "interface": "Ethernet1", "ip_address": "10.0.0.1/31", "ip_addresses": []}
+    ]
+    metadata["InterfacePhysical"]["edges"][0]["node"]["ip_address"]["node"] = None
+    with pytest.raises(AssertionError, match="physical primary IP backfill missing"):
+        await pipeline._rack_rerun_snapshot(Mock(), "scenario")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("namespace", ["default", "overlapping"])
+async def test_ip_uniqueness_reads_primary_assignments_and_deduplicates_inverse_relations(namespace: str) -> None:
+    from tests.integration.test_e2e_pipeline import _ipam_duplicate_report
+
+    address = {
+        "id": "ip",
+        "address": {"value": "10.0.0.1/31"},
+        "ip_namespace": {"node": {"name": {"value": namespace}}},
+    }
+    client = Mock(
+        execute_graphql=AsyncMock(
+            return_value={
+                "IpamIPAddress": {
+                    "count": 1,
+                    "edges": [{"node": {**address, "interface": {"node": {"id": "left"}}}}],
+                },
+                "DcimInterface": {
+                    "count": 2,
+                    "edges": [
+                        {"node": {"id": identifier, "ip_address": {"node": address}}}
+                        for identifier in ("left", "right")
+                    ],
+                },
+            }
+        )
+    )
+    report = await _ipam_duplicate_report(client, "scenario")
+    assert report["assigned"] == report["primary_assigned"] == 2
+    assert not report["duplicate_ip_keys"]
+    assert report["duplicate_interface_ips"] == {f"10.0.0.1/31 [{namespace}]": ["left", "right"]}
+    assert "DcimInterface(offset:" in client.execute_graphql.await_args.kwargs["query"]
+
 
 @pytest.mark.asyncio
 async def test_poll_has_a_deadline_even_when_fetch_never_returns() -> None:

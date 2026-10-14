@@ -633,12 +633,13 @@ class TestE2EPipeline(IntegrationStack):
         """Backfilled IPAM entries have unique address/namespace keys and interface assignments."""
         report = await wait_until(
             fetch=lambda: _ipam_duplicate_report(client, PIPELINE_BRANCH),
-            ready=lambda r: r["total"] > 0 and not r["duplicate_ip_keys"] and not r["duplicate_interface_ips"],
+            ready=lambda r: r["total"] > 0 and r["assigned"] > 0,
             timeout=GENERATOR_TIMEOUT,
             interval=POLL_INTERVAL,
             describe="unique backfilled IPAM assignments",
         )
 
+        assert report["primary_assigned"] > 0, "no primary interface IP assignments were read"
         assert not report["duplicate_ip_keys"], f"duplicate IpamIPAddress keys: {report['duplicate_ip_keys']}"
         assert not report["duplicate_interface_ips"], (
             f"duplicate interface-side IP assignments: {report['duplicate_interface_ips']}"
@@ -1179,8 +1180,9 @@ async def _cabling_and_ip_report(client: InfrahubClient, branch: str) -> dict:
 async def _ipam_duplicate_report(client: InfrahubClient, branch: str) -> dict:
     """Report duplicate IpamIPAddress keys and duplicate assigned interface-side IPs."""
     query = """
-    query IpamDuplicateReport {
-      IpamIPAddress {
+    query IpamDuplicateReport($offset: Int, $limit: Int, $details: Boolean!) {
+      IpamIPAddress(offset: $offset, limit: $limit) {
+        count
         edges {
           node {
             id
@@ -1190,12 +1192,26 @@ async def _ipam_duplicate_report(client: InfrahubClient, branch: str) -> dict:
           }
         }
       }
+      DcimInterface(offset: $offset, limit: $limit) @include(if: $details) {
+        count
+        edges {
+          node {
+            id
+            ip_address {
+              node {
+                id
+                address { value }
+                ip_namespace { node { name { value } } }
+              }
+            }
+          }
+        }
+      }
     }
     """
-    resp = await client.execute_graphql(query=query, branch_name=branch)
+    resp = await _snapshot_collections(client, branch, query, contents=True)
     key_to_ip_ids: dict[tuple[str, str], list[str]] = {}
     key_to_interface_ids: dict[tuple[str, str], set[str]] = {}
-    assigned = 0
     for edge in resp["IpamIPAddress"]["edges"]:
         node = edge["node"]
         address = (node.get("address") or {}).get("value")
@@ -1207,8 +1223,20 @@ async def _ipam_duplicate_report(client: InfrahubClient, branch: str) -> dict:
         key_to_ip_ids.setdefault(key, []).append(node["id"])
         interface = (node.get("interface") or {}).get("node")
         if interface and interface.get("id"):
-            assigned += 1
             key_to_interface_ids.setdefault(key, set()).add(interface["id"])
+
+    primary_assigned = 0
+    for edge in resp["DcimInterface"]["edges"]:
+        interface = edge["node"]
+        node = (interface.get("ip_address") or {}).get("node")
+        if not node:
+            continue
+        address = node["address"]["value"]
+        namespace = node["ip_namespace"]["node"]["name"]["value"]
+        key = (address, namespace)
+        assert node["id"] in key_to_ip_ids.get(key, []), f"primary IP {node['id']} missing from IPAM read"
+        key_to_interface_ids.setdefault(key, set()).add(interface["id"])
+        primary_assigned += 1
 
     duplicate_ip_keys = {
         f"{address} [{namespace}]": sorted(ip_ids)
@@ -1222,7 +1250,8 @@ async def _ipam_duplicate_report(client: InfrahubClient, branch: str) -> dict:
     }
     return {
         "total": sum(len(ip_ids) for ip_ids in key_to_ip_ids.values()),
-        "assigned": assigned,
+        "assigned": sum(len(ids) for ids in key_to_interface_ids.values()),
+        "primary_assigned": primary_assigned,
         "duplicate_ip_keys": duplicate_ip_keys,
         "duplicate_interface_ips": duplicate_interface_ips,
     }
@@ -1604,6 +1633,7 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
             id
             name { value }
             device { node { name { value } } }
+            ip_address { node { id address { value } } }
             ip_addresses { edges { node { id address { value } } } }
           }
         }
@@ -1686,6 +1716,20 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
         "structured_config_files": structured_config_files,
         "structured_config_ethernet_ip_refs": structured_config_ethernet_ip_refs,
     }
+    if contents:
+        physical_ports = {(device, interface) for device, interface, _ in state["physical_interfaces"]}
+        expected = {
+            (ref["artifact"], ref["interface"], ref["ip_address"])
+            for ref in structured_config_ethernet_ip_refs
+            if (ref["artifact"], ref["interface"]) in physical_ports
+        }
+        assert expected, "no modeled physical interface IPs found in structured configs"
+        actual = {
+            (assignment["device"], assignment["interface"], assignment["ip_address"])
+            for assignment in state["physical_interface_ip_assignments"]
+            if assignment["ip_address"]
+        }
+        assert not expected - actual, f"physical primary IP backfill missing: {sorted(expected - actual)}"
     return {
         "ready": (
             len(rack_generator_instances) == len(racks) > 0
@@ -1785,16 +1829,18 @@ def _normalize_physical_interface_ip_assignments(edges: list[dict]) -> list[dict
         node = edge["node"]
         device_name = ((node.get("device") or {}).get("node") or {}).get("name", {}).get("value") or ""
         interface_name = (node.get("name") or {}).get("value") or ""
+        primary = ((node.get("ip_address") or {}).get("node") or {}).get("address", {}).get("value")
         ip_addresses = sorted(
             (ip_edge["node"].get("address") or {}).get("value")
             for ip_edge in (node.get("ip_addresses") or {}).get("edges", [])
             if ip_edge.get("node")
         )
-        if ip_addresses:
+        if primary or ip_addresses:
             assignments.append(
                 {
                     "device": device_name,
                     "interface": interface_name,
+                    "ip_address": primary,
                     "ip_addresses": ip_addresses,
                 }
             )
