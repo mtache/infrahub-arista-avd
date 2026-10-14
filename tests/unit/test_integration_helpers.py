@@ -12,6 +12,19 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 from tests.integration.helpers import read_with_retry, storage_content, wait_until
+from tests.integration.test_seed_selection import _branch_agnostic_seed_kinds
+
+
+def test_seed_introspection_includes_profiles_and_templates() -> None:
+    document = {
+        "nodes": [{"namespace": "Network", "name": "Fabric", "branch": "aware"}],
+        "profiles": [{"namespace": "Profile", "name": "DcimInterface", "branch": "agnostic"}],
+        "templates": [{"namespace": "Template", "name": "DcimDevice", "branch": "agnostic"}],
+    }
+    assert _branch_agnostic_seed_kinds(document, {"NetworkFabric", "ProfileDcimInterface", "TemplateDcimDevice"}) == [
+        "ProfileDcimInterface",
+        "TemplateDcimDevice",
+    ]
 
 
 @pytest.mark.asyncio

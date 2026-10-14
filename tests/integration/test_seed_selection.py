@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import shlex
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
 import pytest
 import pytest_asyncio
@@ -46,11 +47,11 @@ class TestSeedSelection(IntegrationStack):
         kinds = set()
         for path in (root_directory / "objects").rglob("*.yml"):
             kinds.update(document["spec"]["kind"] for document in yaml.safe_load_all(path.read_text()) if document)
-        global_kinds = []
-        for kind in sorted(kinds):
-            schema = await client.schema.get(kind=kind, branch=default_branch)
-            if schema.branch == "agnostic":
-                global_kinds.append(kind)
+        # SDK 1.22 drops `branch` from ProfileSchemaAPI/TemplateSchemaAPI.
+        # Inspect the complete API document so these kinds remain covered too.
+        response = await client._get(url=f"{client.address}/api/schema?{urlencode({'branch': default_branch})}")
+        response.raise_for_status()
+        global_kinds = _branch_agnostic_seed_kinds(response.json(), kinds)
         print(f"seed kinds without branch isolation: {global_kinds}", flush=True)
         return default_branch, global_kinds
 
@@ -125,3 +126,14 @@ class TestSeedSelection(IntegrationStack):
             for interface in template.interfaces.peers:
                 await interface.peer.profiles.fetch()
                 assert interface.peer.profiles.peers, f"Server port has no profile: {interface.peer.display_label}"
+
+
+def _branch_agnostic_seed_kinds(document: dict, kinds: set[str]) -> list[str]:
+    schemas = {
+        f"{schema['namespace']}{schema['name']}": schema
+        for category in ("nodes", "profiles", "templates")
+        for schema in document[category]
+    }
+    assert kinds <= schemas.keys(), f"Seed kinds missing from schema introspection: {kinds - schemas.keys()}"
+    assert all(schemas[kind]["branch"] in {"aware", "agnostic", "local"} for kind in kinds)
+    return sorted(kind for kind in kinds if schemas[kind]["branch"] == "agnostic")
