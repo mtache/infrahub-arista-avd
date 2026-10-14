@@ -20,8 +20,9 @@ through the real triggers. At most two fabrics cascade concurrently; each batch
 settles before the next kickoff, with one stack and the same CI resources. Graph
 mutations use distinct branches from the generated baseline, published once into
 the temporary default branch because Infrahub 1.11 requires that origin. The
-source graph is checked after each scenario. Artifacts are generated before the
-publication so their ready files are available on the scenario branches.
+source graph is checked after each scenario. Artifact tests prepare their own
+definitions only when selected. They use the pipeline branch while it is open,
+or the temporary default branch after publication.
 The fabric's `anta_enabled` and `dci_pool` fields are agnostic. Scenario cleanup
 restores their initial values and deletes only its newly created DCI pool before
 checking the source snapshot. FileObjects use the file download endpoint with
@@ -53,7 +54,10 @@ observes new task IDs and their cascades, including generator/artifact tasks
 without branch metadata. Snapshot polling reads metadata; once settled,
 comparisons read actual storage contents, checksums and IP assignments.
 Storage downloads are cached per client and storage ID with at most two concurrent
-reads. Each artifact definition settles before the next one is triggered. Transient reads have bounded retries and respect `Retry-After`; permanent
+reads. The targeted artifact endpoint receives artifact IDs rather than device
+IDs. Rack snapshots paginate all collections, preserve both passes on disk, and
+show the divergent records on failure. Each artifact definition settles before
+the next one is triggered. Transient reads have bounded retries and respect `Retry-After`; permanent
 GraphQL errors and failed tasks stop the test immediately. Mutations are never
 replayed by the read retry helper.
 

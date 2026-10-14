@@ -16,6 +16,62 @@ from tests.integration.helpers import read_with_retry, storage_content, wait_unt
 from tests.integration.test_seed_selection import _branch_agnostic_seed_kinds
 
 
+@pytest.mark.asyncio
+async def test_targeted_artifact_generation_uses_artifact_ids_and_keeps_every_device() -> None:
+    from tests.integration.test_e2e_pipeline import _artifact_ids_for_targets
+
+    client = Mock(
+        execute_graphql=AsyncMock(
+            return_value={
+                "CoreArtifact": {
+                    "edges": [
+                        {"node": {"id": "catalog-a", "object": {"node": {"id": "device-a"}}}},
+                        {"node": {"id": "catalog-b", "object": {"node": {"id": "device-b"}}}},
+                        {"node": {"id": "catalog-c", "object": {"node": {"id": "foreign-device"}}}},
+                    ]
+                }
+            }
+        )
+    )
+    assert await _artifact_ids_for_targets(client, "scenario", "AVD ANTA Catalog", {"device-b", "device-a"}) == [
+        "catalog-a",
+        "catalog-b",
+    ]
+    with pytest.raises(AssertionError, match="missing-device"):
+        await _artifact_ids_for_targets(client, "scenario", "AVD ANTA Catalog", {"missing-device"})
+
+
+@pytest.mark.asyncio
+async def test_rack_snapshot_reads_all_pages_and_does_not_duplicate_finished_collections() -> None:
+    from tests.integration.test_e2e_pipeline import _snapshot_collections
+
+    client = Mock(
+        execute_graphql=AsyncMock(
+            side_effect=[
+                {
+                    "CoreGeneratorInstance": {"count": 1, "edges": [{"node": {"id": "generator"}}]},
+                    "InterfacePhysical": {"count": 3, "edges": [{"node": {"id": "a"}}]},
+                },
+                {
+                    "CoreGeneratorInstance": {"count": 1, "edges": []},
+                    "InterfacePhysical": {
+                        "count": 3,
+                        "edges": [{"node": {"id": "b"}}, {"node": {"id": "c"}}],
+                    },
+                },
+            ]
+        )
+    )
+    data = await _snapshot_collections(client, "scenario", "query", contents=True)
+    assert [edge["node"]["id"] for edge in data["InterfacePhysical"]["edges"]] == ["a", "b", "c"]
+    assert len(data["CoreGeneratorInstance"]["edges"]) == 1
+    assert client.execute_graphql.await_args_list[1].kwargs["variables"] == {
+        "offset": 1,
+        "limit": 500,
+        "details": True,
+    }
+
+
 def test_seed_introspection_includes_profiles_and_templates() -> None:
     document = {
         "nodes": [{"namespace": "Network", "name": "Fabric", "branch": "aware"}],

@@ -7,7 +7,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from infrahub_sdk.exceptions import ServerNotResponsiveError
 
-from solution_arista_avd.generator import GeneratorMixin, save_file_if_changed, trigger_hostvar_generation
+from solution_arista_avd.generator import (
+    GeneratorMixin,
+    save_file_if_changed,
+    set_fabric_avd_hostvars_ready,
+    trigger_hostvar_generation,
+)
 from solution_arista_avd.pool_roles import ResourceRole
 
 
@@ -21,6 +26,32 @@ def _make_generator() -> GeneratorMixin:
     gen.client.group_context.get_group = AsyncMock(return_value=None)
     gen.client.group_context.add_related_nodes = AsyncMock()
     return gen
+
+
+@pytest.mark.parametrize("initial_ready", [False, True])
+@pytest.mark.asyncio
+async def test_readiness_only_emits_one_ready_event_across_repeated_hostvar_runs(initial_ready: bool) -> None:
+    fabric = SimpleNamespace(avd_hostvars_ready=SimpleNamespace(value=initial_ready))
+    events = []
+
+    async def upsert(**kwargs: object) -> None:
+        events.append(kwargs)
+        fabric.avd_hostvars_ready.value = True
+
+    client = MagicMock(get=AsyncMock(return_value=fabric), execute_graphql=AsyncMock(side_effect=upsert))
+    await set_fabric_avd_hostvars_ready(client, "fabric", True)
+    await set_fabric_avd_hostvars_ready(client, "fabric", True)
+    assert len(events) == (0 if initial_ready else 1)
+    if events:
+        assert events[0]["variables"] == {"id": "fabric", "ready": True}
+
+
+@pytest.mark.asyncio
+async def test_pending_write_is_always_emitted_before_a_changed_hostvar_file() -> None:
+    client = MagicMock(get=AsyncMock(), execute_graphql=AsyncMock())
+    await set_fabric_avd_hostvars_ready(client, "fabric", False)
+    client.get.assert_not_awaited()
+    assert client.execute_graphql.await_args.kwargs["variables"] == {"id": "fabric", "ready": False}
 
 
 def _device(device_id: str = "device-1", *, asn_id: str | None = None) -> SimpleNamespace:

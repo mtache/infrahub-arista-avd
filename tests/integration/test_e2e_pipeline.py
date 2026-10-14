@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING
 import pytest
 import pytest_asyncio
 import yaml
+from infrahub_sdk.branch import BranchStatus
 from infrahub_sdk.protocols import CoreGenericRepository
 from infrahub_sdk.task import TaskFilter
 from infrahub_sdk.testing.repository import GitRepo
@@ -157,12 +158,14 @@ class TestE2EPipeline(IntegrationStack):
         return True
 
     @pytest_asyncio.fixture(scope="class", loop_scope="class")
-    async def artifacts_ready(self, pipeline_ready: bool, client: InfrahubClient):
-        await self._prepare_artifacts(client)
-        return True
+    async def artifacts_ready(self, pipeline_ready: bool, client: InfrahubClient, default_branch: str):
+        baseline = await client.branch.get(PIPELINE_BRANCH)
+        branch = default_branch if baseline.status == BranchStatus.MERGED else PIPELINE_BRANCH
+        await self._prepare_artifacts(client, branch)
+        return branch
 
     @pytest_asyncio.fixture(scope="class", loop_scope="class")
-    async def pipeline_published(self, artifacts_ready: bool, client: InfrahubClient, default_branch: str):
+    async def pipeline_published(self, pipeline_ready: bool, client: InfrahubClient, default_branch: str):
         # Infrahub 1.11 only supports branches originating from the default
         # branch. Publish once inside this temporary stack, after its cascade
         # settles, so every scenario inherits the same generated graph.
@@ -620,7 +623,7 @@ class TestE2EPipeline(IntegrationStack):
     # --- Component 11b: rack generator rerun regression -------------------
     @pytest.mark.asyncio(loop_scope="class")
     async def test_rack_generators_rerun_without_error_or_drift(
-        self, client: InfrahubClient, scenario_branch: str
+        self, client: InfrahubClient, scenario_branch: str, tmp_directory: Path
     ) -> None:
         """Explicit rack reruns, including DC1_BORDER, do not fail or mutate generated state."""
         racks = await client.all(kind="LocationRack", branch=scenario_branch)
@@ -641,13 +644,14 @@ class TestE2EPipeline(IntegrationStack):
             )
             snapshot = await _rack_rerun_snapshot(client, scenario_branch)
             snapshots.append(snapshot["state"])
+            (tmp_directory / f"rack-pass-{pass_number}.json").write_text(json.dumps(snapshot["state"], indent=2))
             print(
                 f"rack rerun pass {pass_number}: racks={len(rack_targets)} "
                 f"rack_instances={len(snapshot['state']['rack_generator_instances'])}",
                 flush=True,
             )
 
-        assert snapshots[1] == snapshots[0], "rack rerun changed generated-state snapshot"
+        assert snapshots[1] == snapshots[0], _snapshot_difference(snapshots[0], snapshots[1])
 
     # --- Component 11b: DCI link hostvars ----------------------------------
     @pytest.mark.asyncio(loop_scope="class")
@@ -699,15 +703,15 @@ class TestE2EPipeline(IntegrationStack):
 
     # --- Component 12: artifacts generated ---------------------------------
     @pytest.mark.asyncio(loop_scope="class")
-    async def test_artifacts_generated(self, artifacts_ready: bool) -> None:
+    async def test_artifacts_generated(self, artifacts_ready: str) -> None:
         assert artifacts_ready
 
-    async def _prepare_artifacts(self, client: InfrahubClient) -> None:
+    async def _prepare_artifacts(self, client: InfrahubClient, branch: str) -> None:
         """Every AVD artifact definition yields at least one Ready artifact on the branch (FR-011/FR-013)."""
-        definitions = await client.all(kind="CoreArtifactDefinition", branch=PIPELINE_BRANCH)
+        definitions = await client.all(kind="CoreArtifactDefinition", branch=branch)
         assert definitions, "no artifact definitions registered (repository sync incomplete?)"
-        previous_tasks = {task.id for task in await _pipeline_tasks(client, PIPELINE_BRANCH)}
-        await _trigger_all_artifacts(client, PIPELINE_BRANCH, definitions)
+        previous_tasks = {task.id for task in await _pipeline_tasks(client, branch)}
+        await _trigger_all_artifacts(client, branch, definitions)
 
         started = time.monotonic()
         retriggered = False
@@ -715,9 +719,9 @@ class TestE2EPipeline(IntegrationStack):
 
         async def artifact_state() -> tuple[list[str], bool]:
             nonlocal quiet
-            tasks = await _execution_tasks(client, PIPELINE_BRANCH, previous_tasks)
+            tasks = await _execution_tasks(client, branch, previous_tasks)
             quiet = quiet + 1 if tasks and all(task.state == "COMPLETED" for task in tasks) else 0
-            artifacts = await client.all(kind="CoreArtifact", branch=PIPELINE_BRANCH, prefetch_relationships=False)
+            artifacts = await client.all(kind="CoreArtifact", branch=branch, prefetch_relationships=False)
             failed = [a.name.value for a in artifacts if a.status.value == "Error"]
             assert not failed, f"Artifact generation failed: {failed}"
             ready = {a.name.value for a in artifacts if a.status.value == "Ready"}
@@ -729,7 +733,7 @@ class TestE2EPipeline(IntegrationStack):
             if not retriggered and time.monotonic() - started >= ARTIFACT_TIMEOUT / 2:
                 retriggered = True
                 await _trigger_all_artifacts(
-                    client, PIPELINE_BRANCH, [d for d in definitions if d.artifact_name.value in missing]
+                    client, branch, [d for d in definitions if d.artifact_name.value in missing]
                 )
 
         await wait_until(
@@ -744,14 +748,14 @@ class TestE2EPipeline(IntegrationStack):
     # --- Component 13: artifact content ------------------------------------
     @pytest.mark.usefixtures("artifacts_ready")
     @pytest.mark.asyncio(loop_scope="class")
-    async def test_artifact_content(self, client: InfrahubClient) -> None:
+    async def test_artifact_content(self, client: InfrahubClient, artifacts_ready: str) -> None:
         """A rendered EOS config mentions its device hostname; the ANTA catalog is populated (FR-012)."""
-        eos_contents = await _fetch_ready_artifact_contents(client, PIPELINE_BRANCH, ARTIFACT_AVD_EOS_CONFIG)
+        eos_contents = await _fetch_ready_artifact_contents(client, artifacts_ready, ARTIFACT_AVD_EOS_CONFIG)
         assert any("hostname" in content for content in eos_contents), "No rendered EOS configuration has a hostname"
         eos_content = next(content for content in eos_contents if "hostname" in content)
         assert eos_content.strip(), "EOS configuration artifact is empty"
 
-        anta_content, _ = await _fetch_ready_artifact_content(client, PIPELINE_BRANCH, ARTIFACT_AVD_ANTA_CATALOG)
+        anta_content, _ = await _fetch_ready_artifact_content(client, artifacts_ready, ARTIFACT_AVD_ANTA_CATALOG)
         assert anta_content and anta_content.strip(), "ANTA catalog artifact is empty"
         assert ANTA_DISABLED_MARKER not in anta_content, (
             "ANTA catalog rendered the disabled marker despite anta_enabled"
@@ -766,7 +770,7 @@ class TestE2EPipeline(IntegrationStack):
                     return True
             return False
 
-        clab_contents = await _fetch_ready_artifact_contents(client, PIPELINE_BRANCH, ARTIFACT_CONTAINERLAB_TOPOLOGY)
+        clab_contents = await _fetch_ready_artifact_contents(client, artifacts_ready, ARTIFACT_CONTAINERLAB_TOPOLOGY)
         assert _has_populated_topology(clab_contents), "No populated ContainerLab topology artifact on the branch"
         topos = [yaml.safe_load(c) for c in clab_contents if c and c.strip()]
         populated = [
@@ -805,6 +809,9 @@ class TestE2EPipeline(IntegrationStack):
             name__value="avd_anta_catalog",
             branch=scenario_branch,
         )
+        catalog_ids = await _artifact_ids_for_targets(
+            client, scenario_branch, ARTIFACT_AVD_ANTA_CATALOG, set(device_ids_by_name.values())
+        )
 
         # Establish disabled-marker catalogs before the proposed change. This
         # makes the subsequent marker -> populated transition prove that the
@@ -814,7 +821,7 @@ class TestE2EPipeline(IntegrationStack):
         await fabric.save()
         response = await client._post(
             f"{client.address}/api/artifact/generate/{definition.id}?branch={scenario_branch}",
-            payload={"nodes": list(device_ids_by_name.values())},
+            payload={"nodes": catalog_ids},
         )
         response.raise_for_status()
         await _wait_for_tasks(client, scenario_branch, previous_tasks)
@@ -856,7 +863,9 @@ class TestE2EPipeline(IntegrationStack):
     # --- Fabric-scoped deployment validation (US4 / `--fabric` selector) ----
     @pytest.mark.usefixtures("artifacts_ready")
     @pytest.mark.asyncio(loop_scope="class")
-    async def test_selected_fabric_deployment(self, client: InfrahubClient, target_fabric: str | None) -> None:
+    async def test_selected_fabric_deployment(
+        self, client: InfrahubClient, target_fabric: str | None, artifacts_ready: str
+    ) -> None:
         """Validate one fabric's deployment when selected via ``--fabric``.
 
         With no ``--fabric`` this skips, so the default suite is unchanged
@@ -889,7 +898,7 @@ class TestE2EPipeline(IntegrationStack):
             assert report["mlag_roles"] >= L2LS_MLAG_ROLES, (
                 f"L2LS MLAG missing a tier: expected {sorted(L2LS_MLAG_ROLES)}, got {sorted(report['mlag_roles'])}"
             )
-            await _assert_pure_layer2_configs(client, PIPELINE_BRANCH, report["roles"])
+            await _assert_pure_layer2_configs(client, artifacts_ready, report["roles"])
 
 
 async def _scenario_isolation_state(client: InfrahubClient, branch: str) -> dict:
@@ -1503,10 +1512,12 @@ async def _hostvar_snapshot(
 async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents: bool = True) -> dict:
     """Return a normalized snapshot of rack-generated state after a rerun."""
     query = """
-    query RackRerunSnapshot {
-      CoreGeneratorInstance {
+    query RackRerunSnapshot($offset: Int, $limit: Int, $details: Boolean!) {
+      CoreGeneratorInstance(offset: $offset, limit: $limit) {
+        count
         edges {
           node {
+            id
             name { value }
             status { value }
             object { node { id display_label } }
@@ -1522,10 +1533,12 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
           }
         }
       }
-      LocationRack {
+      LocationRack(offset: $offset, limit: $limit) {
+        count
         edges { node { id name { value } generation_complete { value } } }
       }
-      IpamIPAddress {
+      IpamIPAddress(offset: $offset, limit: $limit) @include(if: $details) {
+        count
         edges {
           node {
             id
@@ -1535,7 +1548,8 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
           }
         }
       }
-      InterfacePhysical {
+      InterfacePhysical(offset: $offset, limit: $limit) @include(if: $details) {
+        count
         edges {
           node {
             id
@@ -1545,7 +1559,8 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
           }
         }
       }
-      AvdStructuredConfigFile {
+      AvdStructuredConfigFile(offset: $offset, limit: $limit) {
+        count
         edges {
           node {
             id
@@ -1559,7 +1574,7 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
       }
     }
     """
-    resp = await client.execute_graphql(query=query, branch_name=branch)
+    resp = await _snapshot_collections(client, branch, query, contents=contents)
     generator_instances = _normalize_generator_instances(resp["CoreGeneratorInstance"]["edges"])
     rack_generator_instances = [
         instance for instance in generator_instances if instance["definition_name"] == GENERATOR_RACK
@@ -1593,9 +1608,9 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
     state = {
         "generator_instances": generator_instances,
         "rack_generator_instances": rack_generator_instances,
-        "ipam_addresses": _normalize_ipam_addresses(resp["IpamIPAddress"]["edges"]),
+        "ipam_addresses": _normalize_ipam_addresses(resp.get("IpamIPAddress", {"edges": []})["edges"]),
         "physical_interface_ip_assignments": _normalize_physical_interface_ip_assignments(
-            resp["InterfacePhysical"]["edges"]
+            resp.get("InterfacePhysical", {"edges": []})["edges"]
         ),
         # Include ports without an IP as well: tracking cleanup must not delete
         # or recreate a topology-owned interface on the unchanged second pass.
@@ -1605,7 +1620,7 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
                 edge["node"]["name"]["value"],
                 edge["node"]["id"],
             )
-            for edge in resp["InterfacePhysical"]["edges"]
+            for edge in resp.get("InterfacePhysical", {"edges": []})["edges"]
         ),
         "structured_config_files": structured_config_files,
         "structured_config_ethernet_ip_refs": structured_config_ethernet_ip_refs,
@@ -1622,6 +1637,47 @@ async def _rack_rerun_snapshot(client: InfrahubClient, branch: str, *, contents:
         "active_generator_instances": active,
         "state": state,
     }
+
+
+async def _snapshot_collections(client: InfrahubClient, branch: str, query: str, *, contents: bool) -> dict:
+    """Read every metadata/object page, including all unaddressed physical ports."""
+    collections: dict[str, dict] = {}
+    offset = 0
+    while True:
+        response = await read_with_retry(
+            lambda offset=offset: client.execute_graphql(
+                query=query,
+                variables={"offset": offset, "limit": 500, "details": contents},
+                branch_name=branch,
+            )
+        )
+        pending = []
+        for kind, page in response.items():
+            collection = collections.setdefault(kind, {"count": page["count"], "edges": []})
+            assert collection["count"] == page["count"], f"{kind} changed while snapshot was read"
+            if len(collection["edges"]) >= collection["count"]:
+                continue
+            assert page["edges"], f"{kind} snapshot ended before its reported count"
+            collection["edges"].extend(page["edges"])
+            assert len({edge["node"]["id"] for edge in collection["edges"]}) == len(collection["edges"]), (
+                f"{kind} snapshot returned duplicate node IDs"
+            )
+            if len(collection["edges"]) < collection["count"]:
+                pending.append(len(page["edges"]))
+        if not pending:
+            return collections
+        offset += min(pending)
+
+
+def _snapshot_difference(before: dict, after: dict) -> str:
+    differences = []
+    for key in before.keys() | after.keys():
+        if before.get(key) == after.get(key):
+            continue
+        previous = {json.dumps(item, sort_keys=True) for item in before.get(key, [])}
+        current = {json.dumps(item, sort_keys=True) for item in after.get(key, [])}
+        differences.append(f"{key}: removed={sorted(previous - current)[:6]}, added={sorted(current - previous)[:6]}")
+    return "rack rerun changed generated-state snapshot: " + "; ".join(sorted(differences))
 
 
 def _normalize_generator_instances(edges: list[dict]) -> list[dict]:
@@ -1989,6 +2045,28 @@ async def _trigger_all_artifacts(client: InfrahubClient, branch: str, definition
         )
         resp.raise_for_status()
         await _wait_for_tasks(client, branch, before)
+
+
+async def _artifact_ids_for_targets(client: InfrahubClient, branch: str, name: str, targets: set[str]) -> list[str]:
+    """The endpoint's `nodes` filter selects CoreArtifact IDs, not device IDs."""
+    response = await read_with_retry(
+        lambda: client.execute_graphql(
+            query="""query($name: String!) {
+              CoreArtifact(name__value: $name) {
+                edges { node { id object { node { id } } } }
+              }
+            }""",
+            variables={"name": name},
+            branch_name=branch,
+        )
+    )
+    selected = {
+        edge["node"]["object"]["node"]["id"]: edge["node"]["id"]
+        for edge in response["CoreArtifact"]["edges"]
+        if edge["node"]["object"]["node"]["id"] in targets
+    }
+    assert selected.keys() == targets, f"Missing {name} artifacts for targets {targets - selected.keys()}"
+    return sorted(selected.values())
 
 
 async def _fetch_ready_artifact_contents(client: InfrahubClient, branch: str, artifact_name: str) -> list[str]:

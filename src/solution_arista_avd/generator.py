@@ -16,7 +16,7 @@ from .pool_roles import (
     map_prefix_role,
     next_available_prefix,
 )
-from .protocols import DcimDevice, DcimInterface, InterfacePhysical, InterfaceVirtual, RoutingAsn
+from .protocols import DcimDevice, DcimInterface, InterfacePhysical, InterfaceVirtual, NetworkFabric, RoutingAsn
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -85,6 +85,15 @@ async def set_fabric_avd_hostvars_ready(client: InfrahubClient, fabric_id: str, 
 
     Workaround for SDK bug that serializes `parent: null` on hierarchical nodes.
     """
+    if ready:
+        fabric = await client.get(  # type: ignore[type-abstract]
+            NetworkFabric, id=fabric_id, include=["avd_hostvars_ready"]
+        )
+        # Even an equal-value upsert emits the attribute event. A no-op
+        # hostvar run must not schedule another whole-fabric config cascade.
+        if fabric.avd_hostvars_ready.value is True:
+            return
+
     await client.execute_graphql(
         query="""
         mutation FabricUpsert($id: String!, $ready: Boolean!) {
@@ -881,6 +890,8 @@ class GeneratorMixin:
         template_interfaces = await self.client.filters(
             kind="TemplateInterfacePhysical",
             device__ids=[object_template_id],
+            include=["name", "status", "role", "mtu", "description", "l2_mode", "dot1q_id", "mac_address", "index"],
+            prefetch_relationships=False,
         )
         if not template_interfaces:
             return
@@ -888,6 +899,8 @@ class GeneratorMixin:
         existing_interfaces = await self.client.filters(
             DcimInterface,  # type: ignore[type-abstract]
             device__ids=[device_id],
+            include=["name"],
+            prefetch_relationships=False,
         )
         existing_names = {
             name

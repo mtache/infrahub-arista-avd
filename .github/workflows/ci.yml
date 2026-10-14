@@ -318,5 +318,6 @@ jobs:
             /tmp/infrahub-integration/**/instance.log
             /tmp/infrahub-integration/**/tasks.json
             /tmp/infrahub-integration/**/failed-tasks.json
+            /tmp/infrahub-integration/**/rack-pass-*.json
             /tmp/infrahub-integration/**/task-diagnostic-error.txt
             /tmp/infrahub-integration/**/log-diagnostic-error.txt

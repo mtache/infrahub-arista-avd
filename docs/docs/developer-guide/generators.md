@@ -235,6 +235,9 @@ Unchanged hostvar files keep the fabric ready. A device rerun marks the fabric
 pending only before writing changed or missing hostvars, avoiding redundant
 structured-config cascades on unchanged input. Rack reconciliations can still
 mark the fabric pending and its final readiness check restores the flag.
+The readiness helper emits `True` only when the fabric was not already ready,
+so repeated checks preserve the trigger's transition without scheduling another
+whole-fabric structured configuration run.
 
 ### ServerCablingGenerator
 
