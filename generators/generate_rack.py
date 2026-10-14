@@ -43,7 +43,6 @@ from solution_arista_avd.generator import (  # noqa: E402
     trigger_hostvar_generation,
 )
 from solution_arista_avd.protocols import (  # noqa: E402
-    AvdArtifact,
     DcimDevice,
     DcimInterface,
     LocationRack,
@@ -52,6 +51,7 @@ from solution_arista_avd.protocols import (  # noqa: E402
 
 from .asn import set_device_asn  # noqa: E402
 from .rack_generator_query import RackGeneratorQuery  # noqa: E402
+from .rack_hostvar_readiness_query import RackHostvarReadinessQuery  # noqa: E402
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -483,21 +483,24 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
 
     async def fabric_devices(self) -> list[Any]:
         """Return all generated devices under the current fabric."""
-        pods = await self.client.filters(kind=NetworkPod, parent__ids=[self.fabric.id])
-        devices: list[Any] = []
-
-        for pod in pods:
-            await pod.devices.fetch()
-            devices.extend(peer.peer for peer in pod.devices.peers if peer.peer)
-
-            await pod.racks.fetch()
-            for rack_peer in pod.racks.peers:
-                rack = rack_peer.peer
-                if not rack:
+        query = Path(__file__).with_name("rack_hostvar_readiness.gql").read_text()
+        devices = []
+        offset = 0
+        while True:
+            response = await self.client.execute_graphql(query=query, variables={"offset": offset, "limit": 200})
+            data = RackHostvarReadinessQuery.model_validate(response)
+            for edge in data.dcim_device.edges:
+                device = edge.node
+                if device is None or device.pod.node is None:
                     continue
-                await rack.devices.fetch()
-                devices.extend(peer.peer for peer in rack.devices.peers if peer.peer)
-
+                parent = device.pod.node.parent.node
+                if parent is not None and parent.typename__ == "NetworkFabric" and parent.id == self.fabric.id:
+                    devices.append(device)
+            offset += len(data.dcim_device.edges)
+            if offset >= data.dcim_device.count:
+                break
+            if not data.dcim_device.edges:
+                raise ValueError("Device readiness query returned an empty page before its reported count")
         return devices
 
     def device_ids(self, devices: list[Any]) -> list[str]:
@@ -513,30 +516,11 @@ class RackGenerator(InfrahubGenerator, GeneratorMixin):
 
     async def devices_missing_hostvars(self, devices: list[Any]) -> list[Any]:
         """Return devices without an AVD artifact hostvar file."""
-        missing: list[Any] = []
-        for device in devices:
-            hostname = device.name.value
-            artifacts = await self.client.filters(kind=AvdArtifact, name__value=hostname)
-            if not artifacts:
-                missing.append(device)
-                continue
-
-            artifact = artifacts[0]
-            if not artifact.hostvar_file.id:
-                missing.append(device)
-                continue
-
-            try:
-                await artifact.hostvar_file.fetch()
-            except Exception as exc:  # noqa: BLE001 - a missing file means hostvars are not ready
-                self.logger.debug("Hostvar readiness check failed for %s: %s", hostname, exc)
-                missing.append(device)
-                continue
-
-            if not artifact.hostvar_file.peer:
-                missing.append(device)
-
-        return missing
+        return [
+            device
+            for device in devices
+            if device.avd_artifact.node is None or device.avd_artifact.node.hostvar_file.node is None
+        ]
 
     async def invalidate_hostvars(self, device_ids: list[str]) -> None:
         """Keep existing hostvar files in place before targeted regeneration.

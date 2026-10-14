@@ -19,13 +19,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 from infrahub_sdk.exceptions import GraphQLError
-from infrahub_sdk.testing.docker import TestInfrahubDockerClient
+
+from .stack import IntegrationStack
 
 if TYPE_CHECKING:
     from infrahub_sdk import InfrahubClient
 
 
-class TestBgpAsnSchema(TestInfrahubDockerClient):
+class TestBgpAsnSchema(IntegrationStack):
     @staticmethod
     async def _load_schema(client: InfrahubClient, branch: str, schemas: list[dict]) -> None:
         await client.schema.wait_until_converged(branch=branch)

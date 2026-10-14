@@ -241,13 +241,28 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --all-packages
+        run: uv sync --all-packages --frozen
 
       - name: Run integration tests
         run: >-
           uv run pytest tests/integration -m "not e2e"
           --ignore=tests/integration/test_infrahub.py
-          --ignore=tests/integration/test_e2e_pipeline.py -v
+          --ignore=tests/integration/test_e2e_pipeline.py -v --capture=tee-sys
+          --basetemp=/tmp/infrahub-integration-light --durations=0 --durations-min=0
+          --junitxml=integration-light-junit.xml
+
+      - name: Preserve integration evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-light-evidence
+          path: |
+            integration-light-junit.xml
+            /tmp/infrahub-integration-light/**/instance.log
+            /tmp/infrahub-integration-light/**/tasks.json
+            /tmp/infrahub-integration-light/**/failed-tasks.json
+            /tmp/infrahub-integration-light/**/task-diagnostic-error.txt
+            /tmp/infrahub-integration-light/**/log-diagnostic-error.txt
 
   integration-tests-full:
     name: Integration tests (full stack)
@@ -269,7 +284,7 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --all-packages
+        run: uv sync --all-packages --frozen
 
       - name: Build custom Infrahub image
         run: docker build --build-arg INFRAHUB_BASE_VERSION=1.11.5 -t opsmill/infrahub-solution-arista-avd:1.11.5 .
@@ -282,7 +297,26 @@ jobs:
           INFRAHUB_TESTING_DOCKER_PULL: "false"
           INFRAHUB_TESTING_WEB_CONCURRENCY: "2"
           INFRAHUB_TESTING_API_SERVER_COUNT: "1"
+          INFRAHUB_TESTING_TASK_WORKER_COUNT: "2"
+          INFRAHUB_TESTING_TASKMGR_BACKGROUND_SVC_REPLICAS: "1"
           # Generators issue large GraphQL reads; raise the client timeout above
           # the 60s default so a busy server does not trip a false failure.
           INFRAHUB_TIMEOUT: "300"
-        run: uv run pytest tests/integration/test_infrahub.py tests/integration/test_e2e_pipeline.py -v
+        run: >-
+          uv run --no-sync pytest tests/integration/test_infrahub.py
+          tests/integration/test_e2e_pipeline.py tests/integration/test_seed_selection.py -v --capture=tee-sys
+          --basetemp=/tmp/infrahub-integration --durations=0 --durations-min=0
+          --junitxml=integration-junit.xml
+
+      - name: Preserve integration evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: integration-evidence
+          path: |
+            integration-junit.xml
+            /tmp/infrahub-integration/**/instance.log
+            /tmp/infrahub-integration/**/tasks.json
+            /tmp/infrahub-integration/**/failed-tasks.json
+            /tmp/infrahub-integration/**/task-diagnostic-error.txt
+            /tmp/infrahub-integration/**/log-diagnostic-error.txt

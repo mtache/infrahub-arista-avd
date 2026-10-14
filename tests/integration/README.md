@@ -1,0 +1,58 @@
+# Integration validation
+
+Run these tests only when explicitly requested. Use the
+`infrahub-run-integration-tests` skill to prepare an isolated remote worktree,
+verify the committed SHA and locked dependencies, and build a branch-specific
+image. Run stacks serially with the CI resource settings, including one Prefect
+background service replica. Dependency sync and image builds precede pytest.
+
+The suite retains 53 scenarios, including eleven seed selections and the optional
+fabric scenario (skipped without `--fabric`). The performance target is less than
+1,800 seconds for pytest including startup and teardown. Working budgets are
+13 minutes for seeds, 12 minutes for E2E and five minutes for the remaining tests.
+
+## Targeted runs
+
+Each E2E node ID selects its prerequisites through lazy fixtures; preceding test
+methods no longer need to be selected. Only the fabric generator initiates the
+baseline. Pod, rack, structured configuration and backfill generation still run
+through the real triggers. Graph mutations fork the settled baseline and verify
+that their source state remains unchanged.
+
+```bash
+uv run --no-sync pytest \
+  tests/integration/test_e2e_pipeline.py::TestE2EPipeline::test_dci_link_generates_l3_edge_hostvars \
+  -v --capture=tee-sys --durations=0 --durations-min=0 \
+  --basetemp=/tmp/infrahub-it-dci-new --junitxml=/tmp/infrahub-it-dci-junit.xml
+```
+
+Use a fresh external temporary directory per invocation. Rerun only the affected
+lot while investigating; run the complete suite after all affected lots pass.
+Test two E2E nodes separately and in reversed order before the complete gate.
+
+## Coverage and evidence
+
+The seed matrix loads the schema once, forks an empty branch for every selection,
+and invokes the actual `invoke load-objects` command, including Common each time.
+It checks exact fabrics, profile/template selections and pod/rack references.
+Branch-agnostic kinds are discovered through schema introspection; additions are
+removed after each case without touching built-in objects.
+
+Idempotence still executes two passes for all racks, including `DC1_BORDER`, and
+two hostvar passes. Generator requests contain the complete target set. Readiness
+observes new task IDs and their cascades. Snapshot polling reads metadata; once
+settled, comparisons read actual storage contents, checksums and IP assignments.
+Storage downloads are cached per client and storage ID with at most two concurrent
+reads. Transient reads have bounded retries and respect `Retry-After`; permanent
+GraphQL errors and failed tasks stop the test immediately. Mutations are never
+replayed by the read retry helper.
+
+Each container fixture writes `instance.log`, `tasks.json`, failed-task logs and
+any diagnostic error beneath its temporary directory before teardown. Preserve
+these files, pytest output and JUnit results for every run. `--durations=0` reports
+setup, call and teardown separately. Compare timings by test file against the
+original failure report: seed matrix 1,367.81 s (612.84 s setup), E2E 2,570.54 s,
+and other tests 316.99 s. Separate avoided failure timeouts from reduced successful
+execution costs when reporting the gain.
+
+The full-stack CI job remains manual and includes the eleven seed selections.

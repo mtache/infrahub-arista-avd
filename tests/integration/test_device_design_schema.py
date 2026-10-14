@@ -24,7 +24,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
-from infrahub_sdk.testing.docker import TestInfrahubDockerClient
+import pytest_asyncio
+
+from .stack import IntegrationStack
 
 if TYPE_CHECKING:
     from infrahub_sdk import InfrahubClient
@@ -46,23 +48,14 @@ LEGACY_FIELDS = {
 }
 
 
-class TestDeviceDesignSchema(TestInfrahubDockerClient):
-    # Guards the one-time load below. The `schemas` fixture is function-scoped, so
-    # this fixture cannot be class-scoped; the flag gives the same "load once"
-    # behaviour without widening a fixture other tests share.
-    _schema_is_loaded = False
-
-    @pytest.fixture(autouse=True)
+class TestDeviceDesignSchema(IntegrationStack):
+    @pytest_asyncio.fixture(scope="class", loop_scope="class", autouse=True)
     async def _schema_loaded(self, client: InfrahubClient, default_branch: str, schemas: list[dict]) -> None:
-        """Load the repo schemas once for the whole class."""
-        cls = type(self)
-        if cls._schema_is_loaded:
-            return
+        """Load the repo schemas once for this isolated stack."""
         await client.schema.wait_until_converged(branch=default_branch)
         resp = await client.schema.load(schemas=schemas, branch=default_branch, wait_until_converged=True)
         assert resp.errors == {}, f"schema load errors: {resp.errors}"  # SC-001
         await client.schema.wait_until_converged(branch=default_branch)
-        cls._schema_is_loaded = True
 
     async def test_generic_shape(self, default_branch: str, client: InfrahubClient) -> None:
         """The NetworkDeviceDesign generic carries role, device_quantity, and device_template (SC-002)."""

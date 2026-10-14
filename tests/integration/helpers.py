@@ -10,9 +10,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING, Any
+from weakref import WeakKeyDictionary
 
-from infrahub_sdk.exceptions import GraphQLError
+import httpx
+from infrahub_sdk.exceptions import ServerNotReachableError, ServerNotResponsiveError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -83,7 +87,7 @@ POLL_INTERVAL = 10
 def _summarize(value: Any) -> str:
     """Render an observed value compactly for a diagnostic failure message."""
     if isinstance(value, (list, tuple, set)):
-        return f"{type(value).__name__} of length {len(value)}"
+        return repr(value)[:2000]
     if isinstance(value, dict):
         compact = repr(value)
         if len(compact) <= 500:
@@ -100,6 +104,7 @@ async def wait_until[T](
     timeout: int,  # noqa: ASYNC109 (deliberate polling budget, not an asyncio.timeout scope)
     interval: int,
     describe: str,
+    on_pending: Callable[[T], Awaitable[None]] | None = None,
 ) -> T:
     """Poll ``fetch`` until ``ready`` is satisfied or ``timeout`` elapses.
 
@@ -109,18 +114,80 @@ async def wait_until[T](
     """
     deadline = time.monotonic() + timeout
     last: Any = None
-    while True:
-        try:
-            last = await fetch()
-        except GraphQLError as exc:
-            last = exc
-        else:
-            if ready(last):
-                return last
-        if time.monotonic() >= deadline:
-            msg = f"{describe}: timed out after {timeout}s; last observed: {_summarize(last)}"
-            raise AssertionError(msg)
-        await asyncio.sleep(interval)
+    try:
+        async with asyncio.timeout(timeout):
+            while True:
+                last = await read_with_retry(fetch)
+                if ready(last):
+                    return last
+                if on_pending is not None:
+                    await on_pending(last)
+                await asyncio.sleep(min(interval, max(0, deadline - time.monotonic())))
+    except TimeoutError as exc:
+        msg = f"{describe}: timed out after {timeout}s; last observed: {_summarize(last)}"
+        raise AssertionError(msg) from exc
+
+
+async def read_with_retry[T](fetch: Callable[[], Awaitable[T]]) -> T:
+    """Bound a read to 60 seconds, retrying only transient transport/HTTP errors.
+
+    This helper must never wrap mutations: a lost response cannot establish
+    whether a write was applied. Permanent GraphQL errors propagate immediately.
+    """
+    async with asyncio.timeout(60):
+        for attempt in range(4):
+            delay = 2**attempt
+            try:
+                return await fetch()
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code not in {429, 502, 503, 504} or attempt == 3:
+                    raise
+                retry_after = exc.response.headers.get("Retry-After")
+                if retry_after:
+                    try:
+                        delay = max(delay, float(retry_after))
+                    except ValueError:
+                        delay = max(delay, (parsedate_to_datetime(retry_after) - datetime.now(UTC)).total_seconds())
+            except httpx.TransportError, ServerNotReachableError, ServerNotResponsiveError:
+                if attempt == 3:
+                    raise
+            await asyncio.sleep(delay)
+    raise AssertionError("unreachable")
+
+
+_storage_caches: WeakKeyDictionary = WeakKeyDictionary()
+
+
+async def storage_content(client: InfrahubClient, storage_id: str) -> str:
+    """Read immutable storage content once per instance, with two concurrent reads."""
+    if client not in _storage_caches:
+        _storage_caches[client] = ({}, asyncio.Semaphore(2))
+    cache, semaphore = _storage_caches[client]
+
+    async def download() -> str:
+        async with semaphore:
+            return await read_with_retry(lambda: client.object_store.get(identifier=storage_id))
+
+    if storage_id not in cache:
+        cache[storage_id] = asyncio.create_task(download())
+    try:
+        return await cache[storage_id]
+    except BaseException:
+        cache.pop(storage_id, None)
+        raise
+
+
+async def create_branch(client: InfrahubClient, name: str, origin: str) -> str:
+    """Fork a known stable state instead of implicitly branching from main."""
+    response = await client.execute_graphql(
+        query="""mutation($name: String!, $origin: String!) {
+          BranchCreate(data: {name: $name, origin_branch: $origin, sync_with_git: false}) { ok }
+        }""",
+        variables={"name": name, "origin": origin},
+        branch_name=origin,
+    )
+    assert response["BranchCreate"]["ok"], response
+    return name
 
 
 async def device_design_mismatches(client: InfrahubClient, branch: str) -> list[str]:

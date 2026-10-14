@@ -563,54 +563,41 @@ def _artifact_with_hostvar() -> SimpleNamespace:
 @pytest.mark.asyncio
 async def test_hostvar_target_device_ids_uses_full_fabric_when_any_hostvars_missing() -> None:
     gen = _make_generator()
-    super_spine = _named_device("super-spine", "super-spine")
-    spine = _named_device("spine-a", "spine-a")
-    leaf = _named_device("leaf-a", "leaf-a")
-    rack = SimpleNamespace(devices=_rel_peers(leaf))
-    pod = SimpleNamespace(devices=_rel_peers(super_spine, spine), racks=_rel_peers(rack))
-
-    async def filters_side_effect(*args: object, **kwargs: object) -> list[SimpleNamespace]:
-        kind = kwargs.get("kind", args[0] if args else None)
-        kind_name = kind if isinstance(kind, str) else getattr(kind, "__name__", str(kind))
-        if kind_name == "NetworkPod":
-            return [pod]
-        if kind_name == "AvdArtifact" and kwargs.get("name__value") == "super-spine":
-            return [_artifact_with_hostvar()]
-        if kind_name == "AvdArtifact" and kwargs.get("name__value") == "spine-a":
-            return [_artifact_with_hostvar()]
-        if kind_name == "AvdArtifact" and kwargs.get("name__value") == "leaf-a":
-            return []
-        return []
-
-    gen.client.filters = AsyncMock(side_effect=filters_side_effect)
-
+    gen.client.execute_graphql = AsyncMock(return_value=_hostvar_readiness_response(missing={"leaf-a"}))
     assert await gen.hostvar_target_device_ids() == ["super-spine", "spine-a", "leaf-a"]
+    assert gen.client.execute_graphql.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_hostvar_target_device_ids_uses_rack_targets_when_fabric_hostvars_exist() -> None:
     gen = _make_generator()
-    super_spine = _named_device("super-spine", "super-spine")
-    spine = _named_device("spine-a", "spine-a")
-    leaf = _named_device("leaf-a", "leaf-a")
-    rack = SimpleNamespace(devices=_rel_peers(leaf))
-    pod = SimpleNamespace(devices=_rel_peers(super_spine, spine), racks=_rel_peers(rack))
     gen.leaf_switches = [_named_device("leaf-a", "leaf-a")]
     gen.l2leaf_switches = []
     gen.spine_switches = [_named_device("spine-a", "spine-a")]
-
-    async def filters_side_effect(*args: object, **kwargs: object) -> list[SimpleNamespace]:
-        kind = kwargs.get("kind", args[0] if args else None)
-        kind_name = kind if isinstance(kind, str) else getattr(kind, "__name__", str(kind))
-        if kind_name == "NetworkPod":
-            return [pod]
-        if kind_name == "AvdArtifact":
-            return [_artifact_with_hostvar()]
-        return []
-
-    gen.client.filters = AsyncMock(side_effect=filters_side_effect)
-
+    gen.client.execute_graphql = AsyncMock(return_value=_hostvar_readiness_response(missing=set()))
     assert await gen.hostvar_target_device_ids() == ["leaf-a", "spine-a"]
+    assert gen.client.execute_graphql.await_count == 1
+
+
+def _hostvar_readiness_response(missing: set[str]) -> dict:
+    return {
+        "DcimDevice": {
+            "count": 3,
+            "edges": [
+                {
+                    "node": {
+                        "id": name,
+                        "name": {"value": name},
+                        "pod": {"node": {"parent": {"node": {"__typename": "NetworkFabric", "id": "fabric-1"}}}},
+                        "avd_artifact": {
+                            "node": {"hostvar_file": {"node": None if name in missing else {"id": f"file-{name}"}}}
+                        },
+                    }
+                }
+                for name in ("super-spine", "spine-a", "leaf-a")
+            ],
+        }
+    }
 
 
 @pytest.mark.asyncio
@@ -665,3 +652,21 @@ async def test_trigger_hostvar_generation_skips_empty_node_ids() -> None:
 
     client.filters.assert_not_awaited()
     client.execute_graphql.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_fabric_hostvar_readiness_covers_every_page_and_excludes_other_fabrics() -> None:
+    gen = _make_generator()
+    response = _hostvar_readiness_response(missing={"leaf-a"})
+    foreign = _hostvar_readiness_response(missing=set())["DcimDevice"]["edges"][0]
+    foreign["node"]["id"] = "foreign"
+    foreign["node"]["pod"]["node"]["parent"]["node"]["id"] = "other-fabric"
+    edges = response["DcimDevice"]["edges"]
+    gen.client.execute_graphql = AsyncMock(
+        side_effect=[
+            {"DcimDevice": {"count": 4, "edges": [edges[0], foreign]}},
+            {"DcimDevice": {"count": 4, "edges": edges[1:]}},
+        ]
+    )
+    assert await gen.hostvar_target_device_ids() == ["super-spine", "spine-a", "leaf-a"]
+    assert gen.client.execute_graphql.await_args_list[1].kwargs["variables"]["offset"] == 2
