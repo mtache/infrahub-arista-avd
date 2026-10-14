@@ -129,7 +129,6 @@ class GeneratorMixin:
         "loopback_ip",
         "member_of_groups",
         "mgmt_ip",
-        "name",
         "node_id",
         "object_template",
         "pod",
@@ -668,11 +667,9 @@ class GeneratorMixin:
 
         Returns the created device.
         """
-        existing_devices = await self.client.filters(
-            DcimDevice, name__value=name, include=self._DEVICE_RECONCILE_INCLUDE
-        )
+        existing_devices = await self.client.filters(DcimDevice, name__value=name)
         device_existed = bool(existing_devices)
-        existing_device = existing_devices[0] if device_existed else None
+        existing_device = await self._fetch_existing_avd_device(existing_devices[0].id) if device_existed else None
 
         device_kwargs, decisions = self._build_avd_device_payload(
             name=name,
@@ -689,22 +686,13 @@ class GeneratorMixin:
         )
         self._log_device_field_decisions(name, decisions)
 
-        if existing_device is not None and not decisions["populated"]:
-            # Retain this topology target's device even on a new tracking group.
-            # Rewriting preserved values needlessly emits graph events; missing
-            # intent fields and group membership still use the normal upsert.
-            device = existing_device
-            context = self.client.group_context
-            if context.identifier:
-                await context.add_related_nodes(ids=[device.id])
-        else:
-            device = await self.client.create(DcimDevice, **device_kwargs)  # type: ignore[type-abstract]
-            await device.save(allow_upsert=True)
+        device = await self.client.create(DcimDevice, **device_kwargs)  # type: ignore[type-abstract]
+        await device.save(allow_upsert=True)
         await self._reconcile_physical_interfaces_from_template(device.id, object_template_id)
 
         created_asn: RoutingAsn | None = None
         try:
-            if asn_pool is not None and not self._relationship_node_id(getattr(existing_device, "asn", None)):
+            if asn_pool is not None:
                 created_asn = await self._ensure_device_asn(device.id, asn_pool, fabric_id)
 
             if loopback_pool is not None:
@@ -727,6 +715,13 @@ class GeneratorMixin:
             raise
 
         return device
+
+    async def _fetch_existing_avd_device(self, device_id: str) -> DcimDevice:
+        return await self.client.get(  # type: ignore[type-abstract]
+            DcimDevice,
+            id=device_id,
+            include=self._DEVICE_RECONCILE_INCLUDE,
+        )
 
     def _build_avd_device_payload(
         self,
