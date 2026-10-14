@@ -210,6 +210,10 @@ query RackGenerator($rack_id: String!) {
 7. Upload hostvars JSON to object store
 8. Create/update AvdArtifact with checksum
 
+EVPN tenant services use one paginated, typed read per child kind (VRFs, SVIs,
+and L2 VLANs), including their parent relations and rack/AVD tags. These reads
+belong to one hostvar build, so a subsequent run observes updated service intent.
+
 **Query**: `avd_device_hostvar.gql`
 
 For EVPN Multi-Domain Gateway hostvars, the query fetches `EvpnGatewayGroup.local_domain`, the selected `pod` and its `evpn_domain`, `remote_domain`, members, and peer candidate groups from `remote_domain.remote_gateway_groups`. The generator emits `l3leaf.nodes[].evpn_gateway` only for valid grouped `border_leaf` devices, rejects Pod/local-domain mismatches and same local/remote domain intent, validates the final payload with `pyavd.validate_inputs()`, and derives hostname-only remote peers from valid groups that share the selected remote domain.

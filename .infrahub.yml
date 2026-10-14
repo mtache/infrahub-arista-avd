@@ -171,6 +171,10 @@ python_transforms:
   - name: avd_fabric_doc
     class_name: AvdFabricDocTransform
     file_path: "./transforms/avd_fabric_doc.py"
+    watch:
+      files:
+        - "transforms/avd_fabric_devices_query.py"
+        - "src/solution_arista_avd/protocols.py"
   - name: avd_device_doc
     class_name: AvdDeviceDocTransform
     file_path: "./transforms/avd_device_doc.py"

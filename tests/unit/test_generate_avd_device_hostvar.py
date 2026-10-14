@@ -8,6 +8,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 import yaml
+from infrahub_sdk import InfrahubClient
+from infrahub_sdk.schema import AttributeSchemaAPI, NodeSchemaAPI, RelationshipSchemaAPI
 from pyavd import validate_inputs
 
 import generators.generate_avd_device_hostvar as hostvar_module
@@ -1831,6 +1833,7 @@ def _multi_switch_adapter() -> dict:
 def _evpn_hostvar_objects(*, tenant_id: str | None = None, vrf_id: str | None = None) -> tuple:
     svi = SimpleNamespace(
         id="svi-1",
+        vrf=SimpleNamespace(id=vrf_id),
         svi_id=_attr(100),
         name=_attr("web"),
         enabled=_attr(True),
@@ -1840,13 +1843,20 @@ def _evpn_hostvar_objects(*, tenant_id: str | None = None, vrf_id: str | None = 
     )
     vrf = SimpleNamespace(
         id=vrf_id,
+        tenant=SimpleNamespace(id=tenant_id),
         name=_attr("VRF1"),
         vrf_vni=_attr(10),
         vtep_diagnostic_loopback=_attr(None),
         vtep_diagnostic_loopback_ip_range=_attr(None),
         svis=_rel([svi]),
     )
-    l2vlan = SimpleNamespace(id="l2vlan-1", vlan_id=_attr(200), name=_attr("l2"), vni_override=_attr(20200))
+    l2vlan = SimpleNamespace(
+        id="l2vlan-1",
+        tenant=SimpleNamespace(id=tenant_id),
+        vlan_id=_attr(200),
+        name=_attr("l2"),
+        vni_override=_attr(20200),
+    )
     tenant = SimpleNamespace(
         id=tenant_id,
         name=_attr("T1"),
@@ -1865,7 +1875,9 @@ async def test_tenants_hostvars_returns_empty_when_tenant_lookup_is_empty() -> N
     tenants_data = await gen._build_tenants_hostvars("fabric-1")
 
     assert tenants_data == []
-    gen.client.filters.assert_awaited_once_with(kind="EvpnTenant", fabrics__ids=["fabric-1"])
+    gen.client.filters.assert_awaited_once_with(
+        kind=hostvar_module.EvpnTenant, fabrics__ids=["fabric-1"], prefetch_relationships=False
+    )
 
 
 @pytest.mark.anyio
@@ -1876,18 +1888,26 @@ async def test_tenants_hostvars_prefers_child_side_filters() -> None:
     vrf.svis = _rel([SimpleNamespace(svi_id=_attr(999), name=_attr("WRONG"))])
 
     async def filters_side_effect(*, kind: str, **kwargs: object) -> list[object]:
-        match kind:
+        match kind.__name__:
             case "EvpnTenant":
-                assert kwargs == {"fabrics__ids": ["fabric-1"]}
+                assert kwargs == {"fabrics__ids": ["fabric-1"], "prefetch_relationships": False}
                 return [tenant]
             case "IpamVRF":
-                assert kwargs == {"tenant__ids": ["tenant-1"]}
+                assert kwargs == {"tenant__ids": ["tenant-1"], "include": ["tenant"], "prefetch_relationships": False}
                 return [vrf]
             case "EvpnSvi":
-                assert kwargs == {"vrf__ids": ["vrf-1"]}
+                assert kwargs == {
+                    "vrf__ids": ["vrf-1"],
+                    "include": ["vrf", "rack_tags", "avd_tags"],
+                    "prefetch_relationships": False,
+                }
                 return [svi]
             case "EvpnL2Vlan":
-                assert kwargs == {"tenant__ids": ["tenant-1"]}
+                assert kwargs == {
+                    "tenant__ids": ["tenant-1"],
+                    "include": ["tenant", "rack_tags", "avd_tags"],
+                    "prefetch_relationships": False,
+                }
                 return [l2vlan]
         pytest.fail(f"unexpected filter kind {kind}")
 
@@ -1910,12 +1930,114 @@ async def test_tenants_hostvars_prefers_child_side_filters() -> None:
             "l2vlans": [{"id": 200, "name": "l2", "vni_override": 20200}],
         }
     ]
-    gen.client.filters.assert_any_await(kind="IpamVRF", tenant__ids=["tenant-1"])
-    gen.client.filters.assert_any_await(kind="EvpnSvi", vrf__ids=["vrf-1"])
-    gen.client.filters.assert_any_await(kind="EvpnL2Vlan", tenant__ids=["tenant-1"])
+    assert gen.client.filters.await_count == 4
     tenant.vrfs.fetch.assert_not_awaited()
     vrf.svis.fetch.assert_not_awaited()
     tenant.l2vlans.fetch.assert_not_awaited()
+
+
+async def test_grouped_services_keep_each_tenants_vrfs_vlans_and_tags_and_refresh_on_next_build() -> None:
+    first = _evpn_hostvar_objects(tenant_id="tenant-1", vrf_id="vrf-1")
+    second = _evpn_hostvar_objects(tenant_id="tenant-2", vrf_id="vrf-2")
+    tenant2, vrf2, svi2, vlan2 = second
+    tenant2.name.value = "T2"
+    tenant2.mac_vrf_vni_base.value = 20000
+    vrf2.name.value = "VRF2"
+    svi2.id = "svi-2"
+    svi2.svi_id.value = 300
+    vlan2.id = "l2vlan-2"
+    vlan2.vlan_id.value = 400
+    for _, _, svi, vlan in (first, second):
+        for node in (svi, vlan):
+            node.rack_tags = _rel([_named_peer("Rack-A")])
+            node.avd_tags = _rel([_named_peer("compute"), _named_peer("Rack-A")])
+            node.rack_tags.initialized = node.avd_tags.initialized = True
+
+    async def filters(*, kind: object, **_kwargs: object) -> list:
+        return {
+            hostvar_module.EvpnTenant: [first[0], second[0]],
+            hostvar_module.IpamVRF: [second[1], first[1]],
+            hostvar_module.EvpnSvi: [second[2], first[2]],
+            hostvar_module.EvpnL2Vlan: [second[3], first[3]],
+        }[kind]
+
+    gen = _make_generator()
+    gen.client.filters.side_effect = filters
+    tenants = await gen._build_tenants_hostvars("fabric-1")
+    assert [(t["name"], t["vrfs"][0]["name"], t["l2vlans"][0]["id"]) for t in tenants] == [
+        ("T1", "VRF1", 200),
+        ("T2", "VRF2", 400),
+    ]
+    assert [t["vrfs"][0]["svis"][0]["id"] for t in tenants] == [100, 300]
+    assert all(t["vrfs"][0]["svis"][0]["tags"] == ["Rack-A", "compute"] for t in tenants)
+    assert all(t["l2vlans"][0]["tags"] == ["Rack-A", "compute"] for t in tenants)
+    assert not validate_inputs(_base_hostvars(tenants)).validation_result.violations
+    assert gen.client.filters.await_count == 4
+    for _, _, svi, vlan in (first, second):
+        for node in (svi, vlan):
+            node.rack_tags.fetch.assert_not_awaited()
+            node.avd_tags.fetch.assert_not_awaited()
+
+    svi2.ip_address_virtual.value = "10.30.30.1/24"
+    svi2.avd_tags.peers = [SimpleNamespace(peer=_named_peer("storage"))]
+    refreshed = await gen._build_tenants_hostvars("fabric-1")
+    assert refreshed[1]["vrfs"][0]["svis"][0]["tags"] == ["Rack-A", "storage"]
+    assert refreshed[1]["vrfs"][0]["svis"][0]["ip_address_virtual"] == "10.30.30.1/24"
+    assert tenants[1]["vrfs"][0]["svis"][0]["tags"] == ["Rack-A", "compute"]
+    assert gen.client.filters.await_count == 8
+
+
+async def test_grouped_services_reject_a_child_with_the_wrong_parent() -> None:
+    tenant, vrf, svi, vlan = _evpn_hostvar_objects(tenant_id="tenant-1", vrf_id="vrf-1")
+    svi.vrf.id = "unrelated-vrf"
+    gen = _make_generator()
+    gen.client.filters.side_effect = [[tenant], [vrf], [svi], [vlan]]
+
+    with pytest.raises(ValueError, match="EvpnSvi svi-1 has no queried vrf parent"):
+        await gen._build_tenants_hostvars("fabric-1")
+
+
+async def test_tags_hydrated_by_sdk_include_are_read_without_fetching_again() -> None:
+    client = InfrahubClient(address="http://offline.invalid", config={"username": None, "password": None})
+    schemas = {
+        "EvpnSvi": NodeSchemaAPI(
+            namespace="Evpn",
+            name="Svi",
+            attributes=[],
+            relationships=[RelationshipSchemaAPI(name="avd_tags", peer="AvdTag", cardinality="many")],
+        ),
+        "AvdTag": NodeSchemaAPI(
+            namespace="Avd", name="Tag", attributes=[AttributeSchemaAPI(name="name", kind="Text")], relationships=[]
+        ),
+    }
+    client.schema.get = AsyncMock(side_effect=lambda *, kind, **_kwargs: schemas[kind])
+    client.execute_graphql = AsyncMock(
+        return_value={
+            "EvpnSvi": {
+                "count": 1,
+                "edges": [
+                    {
+                        "node": {
+                            "__typename": "EvpnSvi",
+                            "id": "svi-1",
+                            "avd_tags": {
+                                "edges": [
+                                    {"node": {"__typename": "AvdTag", "id": "tag-1", "name": {"value": "compute"}}}
+                                ]
+                            },
+                        }
+                    }
+                ],
+            }
+        },
+    )
+    [svi] = await client.filters("EvpnSvi", branch="scenario", include=["avd_tags"], prefetch_relationships=False)
+    assert svi.avd_tags.initialized is True
+    svi.avd_tags.fetch = AsyncMock(side_effect=AssertionError("redundant tag fetch"))
+    gen = _make_generator()
+
+    assert await gen._fetch_relationship_peer_names(svi, "avd_tags") == ["compute"]
+    svi.avd_tags.fetch.assert_not_awaited()
 
 
 @pytest.mark.anyio
@@ -1923,7 +2045,7 @@ async def test_tenants_hostvars_falls_back_when_child_side_filters_return_empty(
     tenant, vrf, _svi, _l2vlan = _evpn_hostvar_objects(tenant_id="tenant-1", vrf_id="vrf-1")
 
     async def filters_side_effect(*, kind: str, **kwargs: object) -> list[object]:
-        if kind == "EvpnTenant":
+        if kind is hostvar_module.EvpnTenant:
             return [tenant]
         return []
 
@@ -1946,7 +2068,7 @@ async def test_tenants_hostvars_falls_back_when_child_side_filters_raise(excepti
     tenant, vrf, _svi, _l2vlan = _evpn_hostvar_objects(tenant_id="tenant-1", vrf_id="vrf-1")
 
     async def filters_side_effect(*, kind: str, **kwargs: object) -> list[object]:
-        if kind == "EvpnTenant":
+        if kind is hostvar_module.EvpnTenant:
             return [tenant]
         raise exception_type
 

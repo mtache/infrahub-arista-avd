@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
 import yaml
+from infrahub_sdk.exceptions import NodeNotFoundError
 from infrahub_sdk.generator import InfrahubGenerator
 from netutils.interface import sort_interface_list
 from netutils.vlan import vlanlist_to_config
@@ -64,7 +65,14 @@ from solution_arista_avd.pool_roles import (  # noqa: E402
     next_available_prefix,
     pod_required_mlag_roles,
 )
-from solution_arista_avd.protocols import AvdArtifact, AvdHostvarFile  # noqa: E402
+from solution_arista_avd.protocols import (  # noqa: E402
+    AvdArtifact,
+    AvdHostvarFile,
+    EvpnL2Vlan,
+    EvpnSvi,
+    EvpnTenant,
+    IpamVRF,
+)
 
 from .generate_avd_device_inputs_query import (  # noqa: E402
     GenerateAvdDeviceInputsQuery,
@@ -1441,6 +1449,14 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         if relationship is None:
             return []
 
+        if getattr(relationship, "initialized", False) is True:
+            try:
+                peers = [peer.peer for peer in relationship.peers]
+            except NodeNotFoundError:
+                pass
+            else:
+                if all(cls._peer_name(peer) is not None for peer in peers):
+                    return peers
         await relationship.fetch()
         return [peer.peer for peer in getattr(relationship, "peers", [])]
 
@@ -1451,9 +1467,12 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         filter_name: str,
         parent_id: str | None,
         relationship: object | None,
+        grouped: dict[tuple[str, str], list[Any]] | None = None,
     ) -> list[object]:
         objects: list[object] = []
-        if parent_id:
+        if grouped is not None:
+            objects = grouped.get((kind, parent_id), [])
+        elif parent_id:
             try:
                 objects = await self.client.filters(kind=kind, **{filter_name: [parent_id]})
             except AttributeError, KeyError:
@@ -1467,6 +1486,52 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
 
         await relationship.fetch()
         return [peer.peer for peer in getattr(relationship, "peers", [])]
+
+    async def _load_tenant_services(self, tenants: list[Any]) -> dict[tuple[str, str], list[Any]] | None:
+        """Read each service kind once, retaining child-to-parent and tag data.
+
+        The SDK paginates filters. Keep these collections local to this build;
+        another generator run or branch must observe its own service intent.
+        Older callers without persisted IDs retain relationship traversal.
+        """
+        tenant_ids = [tenant.id for tenant in tenants if getattr(tenant, "id", None)]
+        if len(tenant_ids) != len(tenants):
+            return None
+        try:
+            vrfs = await self.client.filters(
+                kind=IpamVRF, tenant__ids=tenant_ids, include=["tenant"], prefetch_relationships=False
+            )
+            vrf_ids = [vrf.id for vrf in vrfs]
+            svis = (
+                await self.client.filters(
+                    kind=EvpnSvi,
+                    vrf__ids=vrf_ids,
+                    include=["vrf", "rack_tags", "avd_tags"],
+                    prefetch_relationships=False,
+                )
+                if vrf_ids
+                else []
+            )
+            l2vlans = await self.client.filters(
+                kind=EvpnL2Vlan,
+                tenant__ids=tenant_ids,
+                include=["tenant", "rack_tags", "avd_tags"],
+                prefetch_relationships=False,
+            )
+        except AttributeError, KeyError:
+            return None
+        grouped: dict[tuple[str, str], list[Any]] = {}
+        for kind, nodes, relation, parent_ids in (
+            ("IpamVRF", vrfs, "tenant", tenant_ids),
+            ("EvpnSvi", svis, "vrf", vrf_ids),
+            ("EvpnL2Vlan", l2vlans, "tenant", tenant_ids),
+        ):
+            for node in nodes:
+                parent_id = getattr(getattr(node, relation, None), "id", None)
+                if parent_id not in parent_ids:
+                    raise ValueError(f"{kind} {node.id} has no queried {relation} parent")
+                grouped.setdefault((kind, parent_id), []).append(node)
+        return grouped
 
     @classmethod
     async def _fetch_relationship_peer_names(cls, obj: object, relationship_name: str) -> list[str]:
@@ -1492,13 +1557,14 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         the tenants/VRFs/SVIs/L2VLANs structure AVD expects.
         """
         try:
-            tenants = await self.client.filters(kind="EvpnTenant", fabrics__ids=[fabric_id])
+            tenants = await self.client.filters(kind=EvpnTenant, fabrics__ids=[fabric_id], prefetch_relationships=False)
         except AttributeError, KeyError:
             return []
 
         if not tenants:
             return []
 
+        grouped = await self._load_tenant_services(tenants)
         tenants_list: list[dict[str, Any]] = []
         for tenant in tenants:
             tenant_data: dict[str, Any] = {"name": tenant.name.value}
@@ -1514,6 +1580,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
                 filter_name="tenant__ids",
                 parent_id=getattr(tenant, "id", None),
                 relationship=getattr(tenant, "vrfs", None),
+                grouped=grouped,
             )
             vrfs_list: list[dict[str, Any]] = []
             for vrf in vrfs:
@@ -1535,6 +1602,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
                     filter_name="vrf__ids",
                     parent_id=getattr(vrf, "id", None),
                     relationship=getattr(vrf, "svis", None),
+                    grouped=grouped,
                 )
                 svis_list: list[dict[str, Any]] = []
                 for svi in svis:
@@ -1560,7 +1628,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
                 tenant_data["vrfs"] = vrfs_list
 
             # Fetch L2 VLANs for this tenant
-            l2vlans_list = await self._build_l2vlans_hostvars(tenant)
+            l2vlans_list = await self._build_l2vlans_hostvars(tenant, grouped=grouped)
             if l2vlans_list:
                 tenant_data["l2vlans"] = l2vlans_list
 
@@ -1568,7 +1636,9 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
 
         return tenants_list
 
-    async def _build_l2vlans_hostvars(self, tenant: Any) -> list[dict[str, Any]]:
+    async def _build_l2vlans_hostvars(
+        self, tenant: Any, *, grouped: dict[tuple[str, str], list[Any]] | None = None
+    ) -> list[dict[str, Any]]:
         """Build the AVD ``l2vlans`` list for a tenant, with tag-based scoping.
 
         Tags come from each VLAN's ``rack_tags``/``avd_tags`` (same mechanism as
@@ -1580,6 +1650,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
             filter_name="tenant__ids",
             parent_id=getattr(tenant, "id", None),
             relationship=getattr(tenant, "l2vlans", None),
+            grouped=grouped,
         )
         l2vlans_list: list[dict[str, Any]] = []
         for l2vlan in l2vlans:

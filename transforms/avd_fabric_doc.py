@@ -3,6 +3,7 @@
 Generates fabric documentation from stored structured configs.
 """
 
+import asyncio
 import copy
 import json
 from typing import Any
@@ -38,6 +39,7 @@ class AvdFabricDocTransform(InfrahubTransform):
         all_hostvars: dict[str, dict[str, Any]] = {}
         structured_configs: dict[str, dict[str, Any]] = {}
 
+        selected_files: list[tuple[str, str | None, str | None]] = []
         for edge in device_edges:
             device = edge.node
             # Check if device belongs to this fabric
@@ -60,15 +62,47 @@ class AvdFabricDocTransform(InfrahubTransform):
             hostvar_file_node = artifact_node.hostvar_file.node if artifact_node.hostvar_file else None
             sc_file_node = artifact_node.structured_config_file.node if artifact_node.structured_config_file else None
 
-            if hostvar_file_node:
-                hv_file = await self.client.get(AvdHostvarFile, id=hostvar_file_node.id)
-                hostvar_content = await hv_file.download_file()
-                all_hostvars[hostname] = json.loads(hostvar_content)
+            selected_files.append(
+                (
+                    hostname,
+                    hostvar_file_node.id if hostvar_file_node else None,
+                    sc_file_node.id if sc_file_node else None,
+                )
+            )
 
-            if sc_file_node:
-                sc_file = await self.client.get(AvdStructuredConfigFile, id=sc_file_node.id)
-                sc_content = await sc_file.download_file()
-                structured_configs[hostname] = json.loads(sc_content)
+        hostvar_ids = sorted({hv_id for _, hv_id, _ in selected_files if hv_id})
+        config_ids = sorted({sc_id for _, _, sc_id in selected_files if sc_id})
+        hostvar_files = (
+            await self.client.filters(AvdHostvarFile, ids=hostvar_ids, prefetch_relationships=False)
+            if hostvar_ids
+            else []
+        )
+        config_files = (
+            await self.client.filters(AvdStructuredConfigFile, ids=config_ids, prefetch_relationships=False)
+            if config_ids
+            else []
+        )
+        files = {file.id: file for file in [*hostvar_files, *config_files]}
+        missing = set(hostvar_ids + config_ids) - files.keys()
+        if missing:
+            raise ValueError(f"Fabric documentation files disappeared: {sorted(missing)}")
+
+        # Read every content, with two downloads at a time across both kinds.
+        # Keep this cache local: file node IDs can point at different content on
+        # a later generation or branch.
+        semaphore = asyncio.Semaphore(2)
+
+        async def download(file_id: str) -> tuple[str, dict[str, Any]]:
+            async with semaphore:
+                content = await files[file_id].download_file()
+            return file_id, json.loads(content)
+
+        contents = dict(await asyncio.gather(*(download(file_id) for file_id in files)))
+        for hostname, hostvar_id, config_id in selected_files:
+            if hostvar_id:
+                all_hostvars[hostname] = contents[hostvar_id]
+            if config_id:
+                structured_configs[hostname] = contents[config_id]
 
         if not all_hostvars or not structured_configs:
             return f"# {fabric_name}\n\nNo AVD data available for this fabric."
