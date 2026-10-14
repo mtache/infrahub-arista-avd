@@ -771,17 +771,15 @@ class TestE2EPipeline(IntegrationStack):
         definitions = await client.all(kind="CoreArtifactDefinition", branch=branch)
         assert definitions, "no artifact definitions registered (repository sync incomplete?)"
         tasks = await _pipeline_tasks(client, branch)
-        # A merge already renders the published baseline. Observe that execution
-        # before generating only definitions which still have no Ready output.
+        # Settle automatic renders, then refresh every definition against the
+        # completed graph. Ready outputs can predate device/link generation.
         previous_tasks = {task.id for task in tasks if task.state == "COMPLETED"}
         if any(task.state != "COMPLETED" for task in tasks):
             await _wait_for_tasks(client, branch, previous_tasks)
         existing = await client.all(kind="CoreArtifact", branch=branch, prefetch_relationships=False)
         failed = [a.name.value for a in existing if a.status.value == "Error"]
         assert not failed, f"Artifact generation failed: {failed}"
-        ready_names = _ready_artifact_names(existing)
-        missing = [d for d in definitions if d.artifact_name.value not in ready_names]
-        await _trigger_all_artifacts(client, branch, missing)
+        await _trigger_all_artifacts(client, branch, definitions)
 
         started = time.monotonic()
         retriggered = False
@@ -790,7 +788,7 @@ class TestE2EPipeline(IntegrationStack):
         async def artifact_state() -> tuple[list[str], bool]:
             nonlocal quiet
             tasks = await _execution_tasks(client, branch, previous_tasks)
-            quiet = quiet + 1 if (tasks or not missing) and all(task.state == "COMPLETED" for task in tasks) else 0
+            quiet = quiet + 1 if tasks and all(task.state == "COMPLETED" for task in tasks) else 0
             artifacts = await client.all(kind="CoreArtifact", branch=branch, prefetch_relationships=False)
             failed = [a.name.value for a in artifacts if a.status.value == "Error"]
             assert not failed, f"Artifact generation failed: {failed}"

@@ -805,6 +805,35 @@ def test_stack_makes_only_public_bind_configs_readable(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_artifact_setup_refreshes_ready_outputs_from_before_pipeline_generation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.integration import test_e2e_pipeline as pipeline
+
+    definitions = [
+        SimpleNamespace(id=name, artifact_name=SimpleNamespace(value=name)) for name in pipeline.ALL_ARTIFACT_NAMES
+    ]
+    inherited = [
+        SimpleNamespace(
+            name=definition.artifact_name,
+            status=SimpleNamespace(value="Ready"),
+            storage_id=SimpleNamespace(value="seed-time-render"),
+        )
+        for definition in definitions
+    ]
+    client = Mock(all=AsyncMock(side_effect=[definitions, inherited, inherited, inherited]))
+    trigger = AsyncMock()
+    monkeypatch.setattr(pipeline, "POLL_INTERVAL", 0.001)
+    monkeypatch.setattr(pipeline, "_pipeline_tasks", AsyncMock(return_value=[Mock(id="old", state="COMPLETED")]))
+    monkeypatch.setattr(pipeline, "_execution_tasks", AsyncMock(return_value=[Mock(id="refresh", state="COMPLETED")]))
+    monkeypatch.setattr(pipeline, "_trigger_all_artifacts", trigger)
+
+    await pipeline.TestE2EPipeline()._prepare_artifacts(client, "e2e-pipeline")
+
+    trigger.assert_awaited_once_with(client, "e2e-pipeline", definitions)
+
+
+@pytest.mark.asyncio
 async def test_artifact_definitions_settle_before_the_next_definition(monkeypatch: pytest.MonkeyPatch) -> None:
     from tests.integration import test_e2e_pipeline as pipeline
 
