@@ -36,7 +36,8 @@ The seed matrix loads the schema once, forks an empty branch for every selection
 and invokes the actual `invoke load-objects` command, including Common each time.
 It checks exact fabrics, profile/template selections and pod/rack references.
 Branch-agnostic kinds are discovered through schema introspection; additions are
-removed after each case without touching built-in objects.
+visible on the source during that case, then removed before the next selection
+without touching built-in objects. Branch-aware nodes remain isolated throughout.
 
 Idempotence still executes two passes for all racks, including `DC1_BORDER`, and
 two hostvar passes. Generator requests contain the complete target set. Readiness

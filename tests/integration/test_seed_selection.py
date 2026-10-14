@@ -86,7 +86,7 @@ class TestSeedSelection(IntegrationStack):
         seed_origin: tuple[str, list[str]],
         infrahub_port: int,
     ) -> None:
-        origin, _ = seed_origin
+        origin, global_kinds = seed_origin
         branch = seed_branch
         for kind in ("NetworkFabric", "NetworkPod", "LocationRack", "ComputePhysicalServer"):
             assert not await client.all(kind=kind, branch=branch), f"matrix case must start empty: {kind}"
@@ -103,8 +103,15 @@ class TestSeedSelection(IntegrationStack):
         assert await client.all(kind="TemplateDcimDevice", branch=branch), "Common templates not loaded"
         assert await client.all(kind="CoreStandardGroup", branch=branch), "Common groups not loaded"
 
-        # Branch-aware objects must never enter the schema-only source state.
-        assert not await client.all(kind="NetworkFabric", branch=origin)
+        # Agnostic topology nodes are visible on the source during this case;
+        # the fixture removes them before the next selection. Aware nodes must
+        # remain absent from the schema-only source throughout the case.
+        for kind in ("NetworkFabric", "NetworkPod", "LocationRack", "ComputePhysicalServer"):
+            source_ids = {node.id for node in await client.all(kind=kind, branch=origin)}
+            if kind in global_kinds:
+                assert source_ids == {node.id for node in await client.all(kind=kind, branch=branch)}
+            else:
+                assert not source_ids, f"Branch-aware seed objects leaked to source: {kind}"
         pods = await client.all(kind="NetworkPod", branch=branch)
         assert all(pod.parent.id in {fabric.id for fabric in loaded} for pod in pods)
         racks = await client.all(kind="LocationRack", branch=branch)
