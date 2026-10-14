@@ -91,7 +91,7 @@ After `invoke load` completes and you run the generator chain on a fabric:
   - Provision server into a rack
   - Create EVPN tenant
   - Fabric Design visualization (topology, cabling, settings, EVPN)
-- **Stack** — Docker Compose extending Infrahub 1.11.5 with PyAVD. Includes Infrahub UI, service portal, Semaphore (bundled Ansible runner for deployment and ANTA validation), and Neo4j.
+- **Stack** — Docker Compose extending Infrahub (the version set by `INFRAHUB_BASE_VERSION`) with PyAVD. Includes Infrahub UI, service portal, Semaphore (bundled Ansible runner for deployment and ANTA validation), and Neo4j.
 
 | File | What it does |
 |------|-------------|

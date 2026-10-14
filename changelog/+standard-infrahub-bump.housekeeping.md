@@ -1,0 +1,1 @@
+Infrahub and infrahub-sdk updates now come from a single `update-infrahub.yml` workflow that moves every version pin in place with `scripts/update_infrahub_pins.py`, runs both integration test jobs on Infrahub update pull requests, and merges them automatically when those jobs pass.
