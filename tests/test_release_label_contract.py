@@ -167,10 +167,11 @@ def test_gate_never_runs_pull_request_code() -> None:
 
 def test_bot_pull_requests_carry_a_bump_label() -> None:
     """Every workflow that opens a non-release PR must label it so the gate accepts it."""
-    for workflow in ("update-infrahub.yml", "update-infrahub-sdk.yml"):
-        content = (WORKFLOWS_PATH / workflow).read_text()
-        assert "gh pr create" in content
-        assert '--label "changes/patch"' in content or '--label "ci/skip-changelog"' in content, workflow
+    # update-infrahub.yml opens both the Infrahub and the infrahub-sdk bump pull requests.
+    content = (WORKFLOWS_PATH / "update-infrahub.yml").read_text()
+    assert "gh pr create" in content
+    assert '--label "changes/patch"' in content or '--label "ci/skip-changelog"' in content
+    assert not (WORKFLOWS_PATH / "update-infrahub-sdk.yml").exists()
 
 
 def test_exemption_matches_the_release_pr_generator() -> None:

@@ -252,4 +252,4 @@ Ordinary pull requests to `main` carry exactly one `changes/major`, `changes/min
 
 Dispatch **Auto bump version** on `main` to prepare a release. The first release needs an explicit version because no release tag exists yet; later versions can come from merged PR labels. The workflow updates `pyproject.toml` and `uv.lock`, assembles `CHANGELOG.md`, and opens a `chore(release)` pull request. Add a release-notes page and sidebar entry to that PR. A human reviews and merges it; the merge creates the `v<version>` tag and GitHub Release. Do not bump, build, tag, or publish directly on `main`.
 
-Release-notes pages belong under `docs/docs/release-notes/` and are listed explicitly in `docs/sidebars.ts`. Automated Infrahub and SDK bumps use `changes/patch`.
+Release-notes pages belong under `docs/docs/release-notes/` and are listed explicitly in `docs/sidebars.ts`. Automated Infrahub and infrahub-sdk bumps, opened by `update-infrahub.yml`, carry `ci/skip-changelog` and `dependencies` instead, so they need no release-intent label and do not change the version.

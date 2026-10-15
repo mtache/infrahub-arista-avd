@@ -14,3 +14,7 @@
 - name: "ci/skip-changelog"
   description: "No news fragment required for this pull request"
   color: "dddddd"
+
+- name: "dependencies"
+  description: "Pull requests that update a dependency file"
+  color: "0366d6"
