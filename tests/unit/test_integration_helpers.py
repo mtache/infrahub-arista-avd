@@ -9,12 +9,45 @@ from unittest.mock import AsyncMock, Mock
 import httpx
 import pytest
 from infrahub_sdk.exceptions import GraphQLError
+from infrahub_sdk.node import RelatedNode
+from infrahub_sdk.schema import RelationshipSchemaAPI
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-from tests.integration.helpers import read_with_retry, storage_content, wait_until
+from tests.integration.helpers import fabric_deployment_report, read_with_retry, storage_content, wait_until
 from tests.integration.test_seed_selection import _branch_agnostic_seed_kinds
+
+
+@pytest.mark.parametrize(
+    "mlag_roles",
+    [set(), {"l2spine"}, {"l2leaf"}, {"l2spine", "l2leaf"}],
+    ids=["no-mlag", "spine-only", "leaf-only", "both-tiers"],
+)
+@pytest.mark.asyncio
+async def test_fabric_deployment_report_reads_sdk_mlag_membership(mlag_roles: set[str]) -> None:
+    client = Mock()
+    schema = RelationshipSchemaAPI(name="mlag_domain", peer="MlagDomain", cardinality="one", optional=True)
+    devices = [
+        SimpleNamespace(
+            name=SimpleNamespace(value=f"{role}-1"),
+            role=SimpleNamespace(value=role),
+            mlag_domain=RelatedNode(
+                client=client,
+                branch="l2ls",
+                schema=schema,
+                data={"node": {"id": f"domain-{role}"}} if role in mlag_roles else {"node": None},
+            ),
+        )
+        for role in ("l2spine", "l2leaf")
+    ]
+    client.filters = AsyncMock(side_effect=[[SimpleNamespace(id="fabric")], [SimpleNamespace(id="pod")], devices])
+
+    assert await fabric_deployment_report(client, "l2ls", "Fabric-L2LS") == {
+        "roles": {"l2spine": ["l2spine-1"], "l2leaf": ["l2leaf-1"]},
+        "device_count": 2,
+        "mlag_roles": mlag_roles,
+    }
 
 
 @pytest.mark.parametrize("outcome", ["rejected", "accepted", "unexpected-error"])

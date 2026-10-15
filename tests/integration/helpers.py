@@ -367,7 +367,7 @@ async def fabric_deployment_report(client: InfrahubClient, branch: str, fabric_n
         role = device.role.value
         roles.setdefault(role, []).append(device.name.value)
         mlag_domain = getattr(device, "mlag_domain", None)
-        if mlag_domain is not None and getattr(mlag_domain, "node", None):
+        if mlag_domain is not None and mlag_domain.id:
             mlag_roles.add(role)
 
     return {"roles": roles, "device_count": len(devices), "mlag_roles": mlag_roles}
