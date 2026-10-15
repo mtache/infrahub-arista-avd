@@ -166,7 +166,7 @@ class ServerCablingGenerator(InfrahubGenerator):
         for iface_id in server_iface_ids:
             iface = await self.client.get(InterfacePhysical, id=iface_id)
             iface.lag = {"id": lag.id}  # type: ignore[attr-defined]
-            await iface.save(allow_upsert=True)
+            await iface.save(allow_upsert=True, update_group_context=False)
 
         for _, leaf_iface in self._sort_cabling_plan_by_leaf_port(cabling_plan):
             leaf_lag = await self.client.create(
@@ -184,7 +184,7 @@ class ServerCablingGenerator(InfrahubGenerator):
 
             iface = await self.client.get(InterfacePhysical, id=leaf_iface.id)
             iface.lag = {"id": leaf_lag.id}  # type: ignore[attr-defined]
-            await iface.save(allow_upsert=True)
+            await iface.save(allow_upsert=True, update_group_context=False)
 
         self.logger.info(
             "  Bond1 and %s created for %s with %d members",
@@ -392,7 +392,7 @@ class ServerCablingGenerator(InfrahubGenerator):
                 # rather than added to (only the many-side `tagged_vlan` supports extend).
                 leaf_interface.untagged_vlan = {"id": server_iface["untagged_vlan_id"]}  # type: ignore[assignment]
 
-            await leaf_interface.save(allow_upsert=True)
+            await leaf_interface.save(allow_upsert=True, update_group_context=False)
 
     @staticmethod
     def _is_dual_homed(cabling_plan: list[tuple[DcimInterface, DcimInterface]]) -> bool:
@@ -486,7 +486,7 @@ class ServerCablingGenerator(InfrahubGenerator):
         if untagged_vlan_id:
             # Cardinality-one relationship: assign, don't add (see _assign_vlans).
             interface.untagged_vlan = {"id": untagged_vlan_id}  # type: ignore[assignment]
-        await interface.save(allow_upsert=True)
+        await interface.save(allow_upsert=True, update_group_context=False)
 
     async def _clear_member_vlan_relationships(self, interface: InterfacePhysical) -> None:
         await interface.tagged_vlan.fetch()  # type: ignore[union-attr]
@@ -520,4 +520,4 @@ class ServerCablingGenerator(InfrahubGenerator):
         else:
             interface.untagged_vlan = None  # type: ignore[assignment]
 
-        await interface.save(allow_upsert=True)
+        await interface.save(allow_upsert=True, update_group_context=False)

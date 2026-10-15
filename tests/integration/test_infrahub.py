@@ -5,8 +5,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 from infrahub_sdk.protocols import CoreGenericRepository
-from infrahub_sdk.testing.docker import TestInfrahubDockerClient
 from infrahub_sdk.testing.repository import GitRepo
+
+from .stack import IntegrationStack
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -14,7 +15,7 @@ if TYPE_CHECKING:
     from infrahub_sdk import InfrahubClient
 
 
-class TestInfrahub(TestInfrahubDockerClient):
+class TestInfrahub(IntegrationStack):
     @pytest.mark.asyncio
     async def test_load_schema(self, default_branch: str, client: InfrahubClient, schemas: list[dict]) -> None:
         await client.schema.wait_until_converged(branch=default_branch)
@@ -60,13 +61,13 @@ class TestInfrahub(TestInfrahubDockerClient):
         self,
         client: InfrahubClient,
         remote_repos_dir: Path,
-        root_directory: Path,
+        repository_source: Path,
     ) -> None:
         """Add the local directory as a repository in Infrahub and wait for the import to be complete"""
 
         repo = GitRepo(
             name="local-repository",
-            src_directory=root_directory,
+            src_directory=repository_source,
             dst_directory=remote_repos_dir,
         )
         await repo.add_to_infrahub(client=client)

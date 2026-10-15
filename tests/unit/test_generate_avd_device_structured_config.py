@@ -1,7 +1,7 @@
 """Unit tests for AVD device structured config generator."""
 
 import json
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pyavd import get_avd_facts, get_device_structured_config, validate_inputs
@@ -320,6 +320,7 @@ class TestFetchHostvarsFromStorage:
         result = await gen._fetch_hostvars_from_storage(devices)
         assert result == {}
         gen.client.get.assert_not_called()
+        gen.client.filters.assert_not_called()
 
     @pytest.mark.anyio
     async def test_fetches_hostvars_for_devices_with_artifacts(self):
@@ -327,8 +328,9 @@ class TestFetchHostvarsFromStorage:
         hostvars_data = {"hostname": "spine-1", "router_bgp": {"as": "65001"}}
 
         mock_artifact = AsyncMock()
+        mock_artifact.name.value = "spine-1"
         mock_artifact.hostvar_file.peer.download_file = AsyncMock(return_value=json.dumps(hostvars_data))
-        gen.client.get = AsyncMock(return_value=mock_artifact)
+        gen.client.filters = AsyncMock(return_value=[mock_artifact])
 
         devices = [
             {"hostname": "spine-1", "id": "dev-1", "has_hostvar": True},
@@ -336,6 +338,9 @@ class TestFetchHostvarsFromStorage:
         result = await gen._fetch_hostvars_from_storage(devices)
         assert "spine-1" in result
         assert result["spine-1"] == hostvars_data
+        mock_artifact.hostvar_file.fetch.assert_not_awaited()
+        assert gen._artifacts_by_hostname == {"spine-1": mock_artifact}
+        gen.client.get.assert_not_awaited()
 
     @pytest.mark.anyio
     async def test_fetches_hostvars_in_hostname_order(self):
@@ -345,12 +350,13 @@ class TestFetchHostvarsFromStorage:
             "spine-2": json.dumps({"hostname": "spine-2"}),
         }
 
-        async def get_artifact(_kind: object, *, name__value: str, include: list[str]) -> AsyncMock:
+        fetched = []
+        for hostname, content in reversed(artifacts.items()):
             artifact = AsyncMock()
-            artifact.hostvar_file.peer.download_file = AsyncMock(return_value=artifacts[name__value])
-            return artifact
-
-        gen.client.get = AsyncMock(side_effect=get_artifact)
+            artifact.name.value = hostname
+            artifact.hostvar_file.peer.download_file = AsyncMock(return_value=content)
+            fetched.append(artifact)
+        gen.client.filters = AsyncMock(return_value=fetched)
         devices = [
             {"hostname": "spine-2", "id": "dev-2", "has_hostvar": True},
             {"hostname": "leaf-1", "id": "dev-1", "has_hostvar": True},
@@ -359,17 +365,73 @@ class TestFetchHostvarsFromStorage:
         result = await gen._fetch_hostvars_from_storage(devices)
 
         assert list(result) == ["leaf-1", "spine-2"]
+        assert gen.client.filters.await_count == 1
+        gen.client.get.assert_not_awaited()
 
     @pytest.mark.anyio
     async def test_handles_fetch_failure_gracefully(self):
         gen = _make_generator()
-        gen.client.get = AsyncMock(side_effect=Exception("connection error"))
+        gen.client.filters = AsyncMock(side_effect=Exception("connection error"))
 
         devices = [
             {"hostname": "spine-1", "id": "dev-1", "has_hostvar": True},
         ]
         result = await gen._fetch_hostvars_from_storage(devices)
         assert result == {}
+
+
+@pytest.mark.parametrize("metadata", [False, True])
+async def test_two_generations_compare_complete_files_and_preserve_matching_configs(metadata: bool) -> None:
+    from solution_arista_avd.generator import file_content_checksum
+
+    gen = _make_generator()
+    inputs = {
+        "spine1": _underlay_hostvars(hostname="spine1", role="spine", node_id=1),
+        "leaf1": _underlay_hostvars(hostname="leaf1", role="leaf", node_id=3),
+    }
+    facts = get_avd_facts(inputs)
+    artifacts = []
+    for hostname, hostvars in inputs.items():
+        config = get_device_structured_config(hostname=hostname, inputs=hostvars, avd_facts=facts)._as_dict()
+        artifact = MagicMock()
+        artifact.name.value = hostname
+        artifact.hostvar_file.id = f"hostvar-{hostname}"
+        artifact.hostvar_file.fetch = AsyncMock()
+        artifact.hostvar_file.peer.download_file = AsyncMock(return_value=json.dumps(hostvars).encode())
+        artifact.structured_config_file.id = f"config-{hostname}"
+        artifact.structured_config_file.fetch = AsyncMock()
+        artifact.structured_config_file.peer.download_file = AsyncMock(
+            return_value=json.dumps(config, indent=2, sort_keys=True).encode()
+        )
+        if metadata:
+            artifact.structured_config_file.peer.checksum.value = file_content_checksum(
+                artifact.structured_config_file.peer.download_file.return_value
+            )
+        artifact.structured_config_file.peer.save = AsyncMock()
+        artifacts.append(artifact)
+    gen.client.filters = AsyncMock(return_value=list(reversed(artifacts)))
+    query = _make_fabric_query(
+        [
+            _make_pod(
+                pod_devices=[_make_pod_device("spine1", "spine-id", has_hostvar=True)],
+                racks=[_make_rack([_make_rack_device("leaf1", "leaf-id", has_hostvar=True)])],
+            )
+        ]
+    ).model_dump(by_alias=True)
+
+    await gen.generate(query)
+    await gen.generate(query)
+
+    gen.client.get.assert_not_awaited()
+    gen.client.create.assert_not_awaited()
+    assert gen.client.filters.await_count == 2
+    for artifact in artifacts:
+        assert artifact.hostvar_file.peer.download_file.await_count == 2
+        assert artifact.structured_config_file.peer.download_file.await_count == (0 if metadata else 2)
+        artifact.hostvar_file.fetch.assert_not_awaited()
+        artifact.structured_config_file.fetch.assert_not_awaited()
+        artifact.structured_config_file.peer.upload_from_bytes.assert_not_called()
+        artifact.structured_config_file.peer.save.assert_not_awaited()
 
 
 # --- Tests for pyavd validate_inputs API ---

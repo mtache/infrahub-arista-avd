@@ -111,6 +111,7 @@ exclude = [
     "transforms/computed_interface_description_query.py",
     "transforms/cv_workspace_submission_webhook_query.py",
     "transforms/fabric_cabling_plan_query.py",
+    "tests/integration/device_design_parity_query.py",
 ]
 
 

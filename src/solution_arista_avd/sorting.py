@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 from collections import defaultdict
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, cast
 
 from netutils.interface import sort_interface_list
@@ -26,7 +28,7 @@ def create_sorted_device_interface_map(
         sorted_interface_names = sort_interface_list(list(interface_map.keys()))
         device_interface_map[device] = [interface_map[interface] for interface in sorted_interface_names]
 
-    return device_interface_map
+    return _sort_devices(device_interface_map)
 
 
 def create_reverse_sorted_device_interface_map(
@@ -43,4 +45,30 @@ def create_reverse_sorted_device_interface_map(
         sorted_interface_names.reverse()
         device_interface_map[device] = [interface_map[interface] for interface in sorted_interface_names]
 
-    return device_interface_map
+    return _sort_devices(device_interface_map)
+
+
+def _sort_devices(interface_map: dict[DcimDevice, list[DcimInterface]]) -> dict[DcimDevice, list[DcimInterface]]:
+    """Keep cabling independent of GraphQL edge order and partial index hydration."""
+
+    def index(device: DcimDevice) -> Decimal | None:
+        value = getattr(getattr(device, "index", None), "value", None)
+        if isinstance(value, bool) or not isinstance(value, int | float | str | Decimal):
+            return None
+        try:
+            number = Decimal(str(value))
+        except InvalidOperation:
+            return None
+        return number if number.is_finite() else None
+
+    def name_key(device: DcimDevice) -> tuple:
+        name = getattr(getattr(device, "name", None), "value", None) or device.display_label
+        return tuple(
+            (1, int(part)) if part.isdecimal() else (0, part.casefold()) for part in re.split(r"(\d+)", str(name))
+        )
+
+    indexed = all(index(device) is not None for device in interface_map)
+    devices = sorted(
+        interface_map, key=lambda device: ((index(device),) if indexed else ()) + (name_key(device), device.id)
+    )
+    return {device: interface_map[device] for device in devices}

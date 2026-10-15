@@ -251,7 +251,7 @@ def test_preserved_example_sizes(selection: str, pods: int, racks: int, servers:
 @pytest.mark.parametrize(
     ("selection", "profile", "tagged", "untagged"),
     [
-        ("l3ls-multipod-b", "profile-multipod-b-server-compute", {"MultiPod-B-Servers", "MultiPod-B-Storage"}, None),
+        ("l3ls-multipod-b", "profile-multipod-b-compute", {"MultiPod-B-Servers", "MultiPod-B-Storage"}, None),
         ("campus", "profile-campus-endpoint", set(), "Campus-Data"),
         ("single-dc-l3ls", "profile-sdc-l3ls-server-compute", {"SDC-DATA", "SDC-STORAGE"}, None),
         ("single-dc-l3ls", "profile-sdc-l3ls-server-gpu", {"SDC-DATA", "SDC-STORAGE", "SDC-APP"}, None),
@@ -271,3 +271,10 @@ def test_local_server_vlan_bindings(selection: str, profile: str, tagged: set[st
         assert vlans["MultiPod-B-Servers"]["vlan_id"] == 300
         assert vlans["MultiPod-B-Storage"]["vlan_id"] == 400
         assert {row["l2domain"] for row in vlans.values()} == {"Fabric-L3LS-MultiPod-B-L2Domain"}
+
+
+def test_profile_names_fit_builtin_limit() -> None:
+    for path, rows in _batches("all"):
+        for kind, row in rows:
+            if kind.startswith("Profile"):
+                assert len(row["profile_name"]) <= 32, f"{path}: {row['profile_name']} exceeds 32 characters"

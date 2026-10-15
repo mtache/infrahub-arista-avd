@@ -1,10 +1,11 @@
 from __future__ import annotations
 
-import hashlib
+import json
 import logging
 import operator
 import re
 import sys
+from contextlib import suppress
 from copy import deepcopy
 from dataclasses import dataclass
 from ipaddress import IPv4Network, IPv6Network, ip_network
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, TypedDict
 
 import yaml
+from infrahub_sdk.exceptions import NodeNotFoundError
 from infrahub_sdk.generator import InfrahubGenerator
 from netutils.interface import sort_interface_list
 from netutils.vlan import vlanlist_to_config
@@ -50,8 +52,10 @@ from solution_arista_avd.avd import (  # noqa: E402
 from solution_arista_avd.avd import get_avd_type as _get_package_avd_type  # noqa: E402
 from solution_arista_avd.generator import (  # noqa: E402
     fetch_allocated_prefixes,
+    file_content_checksum,
     save_file_if_changed,
     set_fabric_avd_hostvars_ready,
+    stored_file_checksum,
 )
 from solution_arista_avd.pool_roles import (  # noqa: E402
     FABRIC_SUPERNET_PREFIX_LENGTHS,
@@ -63,13 +67,21 @@ from solution_arista_avd.pool_roles import (  # noqa: E402
     next_available_prefix,
     pod_required_mlag_roles,
 )
-from solution_arista_avd.protocols import AvdArtifact, AvdHostvarFile, NetworkPod  # noqa: E402
+from solution_arista_avd.protocols import (  # noqa: E402
+    AvdArtifact,
+    AvdHostvarFile,
+    EvpnL2Vlan,
+    EvpnSvi,
+    EvpnTenant,
+    IpamVRF,
+)
 
 from .generate_avd_device_inputs_query import (  # noqa: E402
     GenerateAvdDeviceInputsQuery,
     GenerateAvdDeviceInputsQueryDcimDeviceEdgesNodeInterfacesEdges,
     GenerateAvdDeviceInputsQueryDcimDeviceEdgesNodeInterfacesEdgesNodeInterfacePhysical,
 )
+from .hostvar_readiness import fabric_devices_with_hostvars  # noqa: E402
 
 if TYPE_CHECKING:
     from infrahub_sdk import InfrahubClient
@@ -161,36 +173,10 @@ def get_generator_avd_type(role: str) -> str:
 
 
 async def check_fabric_hostvars_ready(client: InfrahubClient, fabric_id: str) -> bool:
-    pods = await client.filters(NetworkPod, parent__ids=[fabric_id])
-
-    devices = set()
-    for pod in pods:
-        await pod.devices.fetch()
-        await pod.racks.fetch()
-
-        devices.update(device_peer.peer for device_peer in pod.devices.peers)
-
-        for rack_peer in pod.racks.peers:
-            rack = rack_peer.peer
-            await rack.devices.fetch()
-
-            devices.update(device_peer.peer for device_peer in rack.devices.peers)
-
+    devices = await fabric_devices_with_hostvars(client, fabric_id)
     for device in devices:
-        if not device.avd_artifact.id:
-            return False
-
-        try:
-            await device.avd_artifact.fetch()
-            artifact = device.avd_artifact.peer
-
-            if not artifact.hostvar_file.id:
-                return False
-            await artifact.hostvar_file.fetch()
-            if not artifact.hostvar_file.peer:
-                return False
-        except Exception as exc:  # noqa: BLE001 - any read failure means "not ready yet"
-            logger.debug("Hostvar readiness check failed for a device: %s", exc)
+        artifact = device.avd_artifact.node
+        if artifact is None or artifact.hostvar_file.node is None:
             return False
 
     await set_fabric_avd_hostvars_ready(client, fabric_id, True)
@@ -1465,6 +1451,14 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         if relationship is None:
             return []
 
+        if getattr(relationship, "initialized", False) is True:
+            try:
+                peers = [peer.peer for peer in relationship.peers]
+            except NodeNotFoundError:
+                pass
+            else:
+                if all(cls._peer_name(peer) is not None for peer in peers):
+                    return peers
         await relationship.fetch()
         return [peer.peer for peer in getattr(relationship, "peers", [])]
 
@@ -1475,9 +1469,12 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         filter_name: str,
         parent_id: str | None,
         relationship: object | None,
+        grouped: dict[tuple[str, str], list[Any]] | None = None,
     ) -> list[object]:
         objects: list[object] = []
-        if parent_id:
+        if grouped is not None:
+            objects = grouped.get((kind, parent_id), [])
+        elif parent_id:
             try:
                 objects = await self.client.filters(kind=kind, **{filter_name: [parent_id]})
             except AttributeError, KeyError:
@@ -1491,6 +1488,52 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
 
         await relationship.fetch()
         return [peer.peer for peer in getattr(relationship, "peers", [])]
+
+    async def _load_tenant_services(self, tenants: list[Any]) -> dict[tuple[str, str], list[Any]] | None:
+        """Read each service kind once, retaining child-to-parent and tag data.
+
+        The SDK paginates filters. Keep these collections local to this build;
+        another generator run or branch must observe its own service intent.
+        Older callers without persisted IDs retain relationship traversal.
+        """
+        tenant_ids = [tenant.id for tenant in tenants if getattr(tenant, "id", None)]
+        if len(tenant_ids) != len(tenants):
+            return None
+        try:
+            vrfs = await self.client.filters(
+                kind=IpamVRF, tenant__ids=tenant_ids, include=["tenant"], prefetch_relationships=False
+            )
+            vrf_ids = [vrf.id for vrf in vrfs]
+            svis = (
+                await self.client.filters(
+                    kind=EvpnSvi,
+                    vrf__ids=vrf_ids,
+                    include=["vrf", "rack_tags", "avd_tags"],
+                    prefetch_relationships=False,
+                )
+                if vrf_ids
+                else []
+            )
+            l2vlans = await self.client.filters(
+                kind=EvpnL2Vlan,
+                tenant__ids=tenant_ids,
+                include=["tenant", "rack_tags", "avd_tags"],
+                prefetch_relationships=False,
+            )
+        except AttributeError, KeyError:
+            return None
+        grouped: dict[tuple[str, str], list[Any]] = {}
+        for kind, nodes, relation, parent_ids in (
+            ("IpamVRF", vrfs, "tenant", tenant_ids),
+            ("EvpnSvi", svis, "vrf", vrf_ids),
+            ("EvpnL2Vlan", l2vlans, "tenant", tenant_ids),
+        ):
+            for node in nodes:
+                parent_id = getattr(getattr(node, relation, None), "id", None)
+                if parent_id not in parent_ids:
+                    raise ValueError(f"{kind} {node.id} has no queried {relation} parent")
+                grouped.setdefault((kind, parent_id), []).append(node)
+        return grouped
 
     @classmethod
     async def _fetch_relationship_peer_names(cls, obj: object, relationship_name: str) -> list[str]:
@@ -1516,13 +1559,14 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         the tenants/VRFs/SVIs/L2VLANs structure AVD expects.
         """
         try:
-            tenants = await self.client.filters(kind="EvpnTenant", fabrics__ids=[fabric_id])
+            tenants = await self.client.filters(kind=EvpnTenant, fabrics__ids=[fabric_id], prefetch_relationships=False)
         except AttributeError, KeyError:
             return []
 
         if not tenants:
             return []
 
+        grouped = await self._load_tenant_services(tenants)
         tenants_list: list[dict[str, Any]] = []
         for tenant in tenants:
             tenant_data: dict[str, Any] = {"name": tenant.name.value}
@@ -1538,6 +1582,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
                 filter_name="tenant__ids",
                 parent_id=getattr(tenant, "id", None),
                 relationship=getattr(tenant, "vrfs", None),
+                grouped=grouped,
             )
             vrfs_list: list[dict[str, Any]] = []
             for vrf in vrfs:
@@ -1559,6 +1604,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
                     filter_name="vrf__ids",
                     parent_id=getattr(vrf, "id", None),
                     relationship=getattr(vrf, "svis", None),
+                    grouped=grouped,
                 )
                 svis_list: list[dict[str, Any]] = []
                 for svi in svis:
@@ -1584,7 +1630,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
                 tenant_data["vrfs"] = vrfs_list
 
             # Fetch L2 VLANs for this tenant
-            l2vlans_list = await self._build_l2vlans_hostvars(tenant)
+            l2vlans_list = await self._build_l2vlans_hostvars(tenant, grouped=grouped)
             if l2vlans_list:
                 tenant_data["l2vlans"] = l2vlans_list
 
@@ -1592,7 +1638,9 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
 
         return tenants_list
 
-    async def _build_l2vlans_hostvars(self, tenant: Any) -> list[dict[str, Any]]:
+    async def _build_l2vlans_hostvars(
+        self, tenant: Any, *, grouped: dict[tuple[str, str], list[Any]] | None = None
+    ) -> list[dict[str, Any]]:
         """Build the AVD ``l2vlans`` list for a tenant, with tag-based scoping.
 
         Tags come from each VLAN's ``rack_tags``/``avd_tags`` (same mechanism as
@@ -1604,6 +1652,7 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
             filter_name="tenant__ids",
             parent_id=getattr(tenant, "id", None),
             relationship=getattr(tenant, "l2vlans", None),
+            grouped=grouped,
         )
         l2vlans_list: list[dict[str, Any]] = []
         for l2vlan in l2vlans:
@@ -1633,11 +1682,26 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         if pool_node is None:
             return None
 
-        pool = await self.client.get(kind=pool_kind, id=_field(pool_node, "id"), include=["resources"])
-        await pool.resources.fetch()
+        # Role-based pools already carry their resources in the typed generator
+        # query. Preserve the query's resource order and use the first prefix,
+        # exactly as the SDK traversal below does. Do not cache between runs.
+        for resource in _relationship_nodes(pool_node, "resources"):
+            prefix = _value(resource, "prefix") or _value(resource, "address")
+            if prefix is not None:
+                return str(prefix)
 
-        for resource_peer in pool.resources.peers:
-            resource = resource_peer.peer
+        # Legacy pool references contain only an ID. The include hydrates their
+        # resource peers; fetch again only when the SDK store is incomplete.
+        pool = await self.client.get(kind=pool_kind, id=_field(pool_node, "id"), include=["resources"])
+        resources = None
+        if getattr(pool.resources, "initialized", False) is True:
+            with suppress(NodeNotFoundError):
+                resources = [peer.peer for peer in pool.resources.peers]
+        if resources is None:
+            await pool.resources.fetch()
+            resources = [peer.peer for peer in pool.resources.peers]
+
+        for resource in resources:
             # CoreIPPrefixPool resources are IpamPrefix nodes with a prefix attribute
             if hasattr(resource, "prefix"):
                 return str(resource.prefix.value)
@@ -2344,9 +2408,6 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         pod = device.pod.node
         fabric = pod.parent.node
 
-        # Mark hostvars as not ready while regenerating
-        await set_fabric_avd_hostvars_ready(self.client, fabric.id, False)
-
         # Extract basic device info
         device_id = device.id
         hostname = device.name.value
@@ -2548,8 +2609,6 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         )
 
         # Validate hostvars against pyAVD schema before saving
-        import json
-
         from pyavd import validate_inputs
 
         validated = validate_inputs(hostvars)
@@ -2563,8 +2622,12 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
             error_detail = "; ".join(violation_msgs)
             raise ValueError(f"pyAVD validation failed for {hostname}: {error_detail}")
 
+        await self._store_hostvars(fabric_id=fabric.id, device_id=device_id, hostname=hostname, hostvars=hostvars)
+
+    async def _store_hostvars(self, *, fabric_id: str, device_id: str, hostname: str, hostvars: dict[str, Any]) -> None:
+        """Reconcile the file, marking the fabric pending only when content changes."""
         new_content = json.dumps(hostvars, indent=2).encode()
-        new_checksum = hashlib.sha256(new_content).hexdigest()
+        new_checksum = file_content_checksum(new_content)
 
         artifact_name = hostname
 
@@ -2585,14 +2648,20 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         existing_checksum = None
         if avd_artifact.hostvar_file.id:
             try:
-                await avd_artifact.hostvar_file.fetch()
+                # include=["hostvar_file"] already hydrates the file peer.
                 existing_file = avd_artifact.hostvar_file.peer
                 if existing_file:
-                    existing_content = await existing_file.download_file()
-                    existing_checksum = hashlib.sha256(existing_content).hexdigest()
+                    existing_checksum = await stored_file_checksum(existing_file)
             except Exception as exc:  # noqa: BLE001 - treat any fetch/download failure as "no existing file"
                 self.logger.warning("Could not read existing hostvar file for %s, forcing re-upload: %s", hostname, exc)
                 existing_file = None
+
+        # A no-op device rerun leaves the existing file ready. Toggling False
+        # for every device would trigger redundant full-fabric structured-config
+        # runs when each one toggles back to True. Changed/missing files still
+        # mark the fabric pending before the write, including when it fails.
+        if existing_file is None or existing_checksum != new_checksum:
+            await set_fabric_avd_hostvars_ready(self.client, fabric_id, False)
 
         uploaded = await save_file_if_changed(
             existing_file=existing_file,
@@ -2608,4 +2677,4 @@ class GenerateAVDDeviceHostvar(InfrahubGenerator):
         else:
             self.logger.info(f"Hostvars updated for {hostname}")
 
-        await check_fabric_hostvars_ready(self.client, fabric.id)
+        await check_fabric_hostvars_ready(self.client, fabric_id)

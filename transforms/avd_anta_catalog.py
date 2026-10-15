@@ -100,25 +100,29 @@ class AvdAntaCatalogTransform(InfrahubTransform):
     async def _fabric_structured_configs(
         self, parsed: AvdAntaCatalogQuery, fabric_id: str
     ) -> dict[str, dict[str, Any]]:
-        """Download validated structured config for every device in the fabric."""
-        configs: dict[str, dict[str, Any]] = {}
+        """Read file metadata once, then download each complete config sequentially."""
+        file_ids: dict[str, str] = {}
         for edge in parsed.dcim_device.edges:
             device = edge.node
             if not device or not device.name or not device.name.value:
                 continue
             if self._device_fabric_id(device) != fabric_id:
                 continue
-            sc = await self._download_structured_config(device)
-            if sc is not None:
-                configs[device.name.value] = sc
-        return configs
+            artifact = device.avd_artifact.node if device.avd_artifact else None
+            sc_node = artifact.structured_config_file.node if artifact else None
+            if sc_node:
+                file_ids[device.name.value] = sc_node.id
+        if not file_ids:
+            return {}
 
-    async def _download_structured_config(self, device: DeviceNode) -> dict[str, Any] | None:
-        """Download and validate a device's structured config, or None if absent/invalid."""
-        artifact = device.avd_artifact.node if device.avd_artifact else None
-        sc_node = artifact.structured_config_file.node if artifact else None
-        if not sc_node:
-            return None
-        sc_file = await self.client.get(AvdStructuredConfigFile, id=sc_node.id)
-        content = await sc_file.download_file()
-        return validate_structured_config(json.loads(content)).validated_data
+        # Every catalog reads its siblings. A per-file graph request multiplies
+        # this traffic across concurrent catalog tasks and can exceed their timeout.
+        files = await self.client.filters(
+            AvdStructuredConfigFile, ids=sorted(set(file_ids.values())), prefetch_relationships=False
+        )
+        files_by_id = {file.id: file for file in files}
+        configs: dict[str, dict[str, Any]] = {}
+        for hostname, file_id in file_ids.items():
+            content = await files_by_id[file_id].download_file()
+            configs[hostname] = validate_structured_config(json.loads(content)).validated_data
+        return configs

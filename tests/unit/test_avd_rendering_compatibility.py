@@ -113,11 +113,17 @@ async def test_real_rendering_from_stored_files(scenario: str) -> None:
 
     async def get_file(*_args: object, **kwargs: str) -> AsyncMock:
         file = AsyncMock()
+        file.id = kwargs["id"]
         file.download_file.return_value = stored[kwargs["id"]]
         return file
 
     client = AsyncMock()
     client.get.side_effect = get_file
+
+    async def filter_files(_kind: object, *, ids: list[str], **_kwargs: object) -> list[AsyncMock]:
+        return [await get_file(id=identifier) for identifier in ids]
+
+    client.filters.side_effect = filter_files
     device_data = {
         "DcimDevice": {
             "edges": [

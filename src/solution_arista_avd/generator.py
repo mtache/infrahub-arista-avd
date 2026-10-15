@@ -16,12 +16,13 @@ from .pool_roles import (
     map_prefix_role,
     next_available_prefix,
 )
-from .protocols import DcimDevice, DcimInterface, InterfacePhysical, InterfaceVirtual, RoutingAsn
+from .protocols import DcimDevice, DcimInterface, InterfacePhysical, InterfaceVirtual, NetworkFabric, RoutingAsn
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
 
     from infrahub_sdk import InfrahubClient
+    from infrahub_sdk.node import RelationshipManager
 
     from .protocols import LocationRack, NetworkPod
 
@@ -32,6 +33,19 @@ logger = logging.getLogger("infrahub.tasks")
 DEVICE_STATUS_PROVISIONING = "provisioning"
 AVD_DEVICES_GROUP = "avd_devices"
 VTEP_LOOPBACK_ROLES = {"leaf", "border_leaf"}
+
+
+def file_content_checksum(content: bytes) -> str:
+    """Match Infrahub's CoreFileObject checksum for content reconciliation."""
+    return hashlib.sha1(content, usedforsecurity=False).hexdigest()
+
+
+async def stored_file_checksum(file: Any) -> str:
+    """Use current file metadata; download only when it lacks a valid checksum."""
+    checksum = getattr(getattr(file, "checksum", None), "value", None)
+    if isinstance(checksum, str) and len(checksum) == 40 and all(c in "0123456789abcdef" for c in checksum):
+        return checksum
+    return file_content_checksum(await file.download_file())
 
 
 async def save_file_if_changed(
@@ -84,6 +98,15 @@ async def set_fabric_avd_hostvars_ready(client: InfrahubClient, fabric_id: str, 
 
     Workaround for SDK bug that serializes `parent: null` on hierarchical nodes.
     """
+    if ready:
+        fabric = await client.get(  # type: ignore[type-abstract]
+            NetworkFabric, id=fabric_id, include=["avd_hostvars_ready"]
+        )
+        # Even an equal-value upsert emits the attribute event. A no-op
+        # hostvar run must not schedule another whole-fabric config cascade.
+        if fabric.avd_hostvars_ready.value is True:
+            return
+
     await client.execute_graphql(
         query="""
         mutation FabricUpsert($id: String!, $ready: Boolean!) {
@@ -880,6 +903,8 @@ class GeneratorMixin:
         template_interfaces = await self.client.filters(
             kind="TemplateInterfacePhysical",
             device__ids=[object_template_id],
+            include=["name", "status", "role", "mtu", "description", "l2_mode", "dot1q_id", "mac_address", "index"],
+            prefetch_relationships=False,
         )
         if not template_interfaces:
             return
@@ -887,12 +912,15 @@ class GeneratorMixin:
         existing_interfaces = await self.client.filters(
             DcimInterface,  # type: ignore[type-abstract]
             device__ids=[device_id],
+            include=["name"],
+            prefetch_relationships=False,
         )
         existing_names = {
             name
             for interface in existing_interfaces
             if (name := self._attribute_value(getattr(interface, "name", None)))
         }
+        await self._retain_template_interfaces(existing_interfaces, template_interfaces)
 
         for template_interface in template_interfaces:
             name = self._attribute_value(getattr(template_interface, "name", None))
@@ -911,6 +939,27 @@ class GeneratorMixin:
             interface = await self.client.create(InterfacePhysical, **interface_kwargs)  # type: ignore[type-abstract]
             await interface.save(allow_upsert=True)
             existing_names.add(name)
+
+    async def _retain_template_interfaces(self, interfaces: Sequence[Any], templates: Sequence[Any]) -> None:
+        """Keep this target's previously created ports without claiming manual ones."""
+        context = self.client.group_context
+        if not context.identifier:
+            return
+        cached = getattr(self, "_template_interface_ownership", None)
+        if cached is None or cached[0] is not context:
+            group = await context.get_group()
+            owned_ids = set(cast("RelationshipManager", group.members).peer_ids) if group else set()
+            self._template_interface_ownership = (context, owned_ids)
+        else:
+            owned_ids = cached[1]
+        template_names = {self._attribute_value(getattr(template, "name", None)) for template in templates}
+        retained_ids = [
+            interface.id
+            for interface in interfaces
+            if self._attribute_value(getattr(interface, "name", None)) in template_names and interface.id in owned_ids
+        ]
+        if retained_ids:
+            await context.add_related_nodes(ids=retained_ids)
 
     @staticmethod
     def _has_non_empty_value(attribute: object) -> bool:
@@ -1178,17 +1227,18 @@ class GeneratorMixin:
 
 async def check_all_racks_generated(client: InfrahubClient, fabric_id: str) -> bool:
     """Check if all racks across all non-fabric pods have generation_complete set to True."""
-    pods = await client.filters(kind="NetworkPod", parent__ids=[fabric_id])
-
-    for pod_node in pods:
-        pod = cast("NetworkPod", pod_node)
-        if hasattr(pod, "role") and pod.role.value == "fabric":
-            continue
-
-        racks = await client.filters(kind="LocationRack", pod__ids=[pod.id])
-        if not racks:
-            continue
-
+    pod_nodes = await client.filters(
+        kind="NetworkPod", parent__ids=[fabric_id], include=["role"], prefetch_relationships=False
+    )
+    pods = [cast("NetworkPod", node) for node in pod_nodes]
+    pod_ids = [pod.id for pod in pods if not hasattr(pod, "role") or pod.role.value != "fabric"]
+    if pod_ids:
+        racks = await client.filters(
+            kind="LocationRack",
+            pod__ids=pod_ids,
+            include=["name", "generation_complete"],
+            prefetch_relationships=False,
+        )
         for rack_node in racks:
             rack = cast("LocationRack", rack_node)
             if not rack.generation_complete.value:

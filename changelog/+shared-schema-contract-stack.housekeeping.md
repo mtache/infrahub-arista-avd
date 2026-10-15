@@ -1,0 +1,1 @@
+Share the nine ASN and device-design integration contracts on one schema-only stack with explicit prerequisites and ASN cleanup. Keep all 53 scenarios and select the complete suite in the manual full-stack CI job.

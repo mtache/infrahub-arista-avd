@@ -9,12 +9,12 @@ from __future__ import annotations
 import json
 import logging
 from operator import itemgetter
-from typing import Any
+from typing import Any, cast
 
 from infrahub_sdk.generator import InfrahubGenerator
 from pyavd import get_avd_facts, get_device_structured_config, validate_inputs
 
-from solution_arista_avd.generator import save_file_if_changed
+from solution_arista_avd.generator import file_content_checksum, save_file_if_changed, stored_file_checksum
 from solution_arista_avd.protocols import AvdArtifact, AvdStructuredConfigFile
 
 from .generate_avd_inputs_query import GenerateAvdInputsQuery
@@ -109,19 +109,29 @@ class AvdDeviceStructuredConfigGenerator(InfrahubGenerator):
             Dict mapping hostname to hostvars content (only devices with artifacts)
         """
         result: dict[str, dict[str, Any]] = {}
+        self._artifacts_by_hostname: dict[str, AvdArtifact] = {}
+        hostnames = sorted(device["hostname"] for device in devices if device.get("has_hostvar"))
+        if not hostnames:
+            return result
+        try:
+            artifacts = await self.client.filters(
+                AvdArtifact,
+                name__values=hostnames,
+                include=["hostvar_file", "structured_config_file"],
+                prefetch_relationships=False,
+            )
+            self._artifacts_by_hostname = {artifact.name.value: cast("AvdArtifact", artifact) for artifact in artifacts}
+        except Exception as exc:  # noqa: BLE001 - preserve the generator's missing-input handling
+            self.logger.warning("Failed to fetch fabric artifact metadata: %s", exc)
+            return result
 
-        for device in sorted(devices, key=itemgetter("hostname")):
-            hostname = device["hostname"]
-
-            if not device.get("has_hostvar"):
-                continue
-
+        for hostname in hostnames:
             try:
-                artifact = await self.client.get(AvdArtifact, name__value=hostname, include=["hostvar_file"])
+                artifact = self._artifacts_by_hostname[hostname]
                 if not artifact.hostvar_file.id:
                     self.logger.warning(f"No hostvar file for {hostname}, skipping")
                     continue
-                await artifact.hostvar_file.fetch()
+                # The grouped include hydrates the file peers into the SDK store.
                 hostvar_file = artifact.hostvar_file.peer
                 if not hostvar_file:
                     self.logger.warning(f"Hostvar file peer not found for {hostname}, skipping")
@@ -234,8 +244,6 @@ class AvdDeviceStructuredConfigGenerator(InfrahubGenerator):
             self.logger.exception("AVD facts generation failed")
             return
 
-        import hashlib
-
         success_count = 0
         skipped_count = 0
         failed_devices: list[str] = []
@@ -249,22 +257,18 @@ class AvdDeviceStructuredConfigGenerator(InfrahubGenerator):
                 )
 
                 new_content = json.dumps(structured_config_dict, indent=2, sort_keys=True).encode()
-                new_checksum = hashlib.sha256(new_content).hexdigest()
+                new_checksum = file_content_checksum(new_content)
 
-                avd_artifact = await self.client.get(
-                    AvdArtifact, name__value=hostname, include=["structured_config_file"]
-                )
+                avd_artifact = self._artifacts_by_hostname[hostname]
 
                 # Get existing structured config file if it exists
                 existing_file = None
                 existing_checksum = None
                 if avd_artifact.structured_config_file.id:
                     try:
-                        await avd_artifact.structured_config_file.fetch()
                         existing_file = avd_artifact.structured_config_file.peer
                         if existing_file:
-                            existing_content = await existing_file.download_file()
-                            existing_checksum = hashlib.sha256(existing_content).hexdigest()
+                            existing_checksum = await stored_file_checksum(existing_file)
                     except Exception as exc:  # noqa: BLE001 - treat any fetch/download failure as "no existing file"
                         self.logger.warning(
                             "Could not read existing structured config for %s, forcing re-upload: %s",

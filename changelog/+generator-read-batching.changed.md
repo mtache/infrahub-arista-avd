@@ -1,0 +1,1 @@
+Read cabling endpoints, existing uplinks and fabric artifact metadata in groups, and hydrate backfill interfaces from the generator query. Preserve connector conflicts, link medium, earlier interface writes and topology ownership while reducing repeated GraphQL reads. Reuse hydrated file peers while retaining full content comparisons before hostvar or structured-config uploads.

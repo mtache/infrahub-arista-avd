@@ -7,6 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from infrahub_sdk.exceptions import NodeNotFoundError
+from infrahub_sdk.node import InfrahubNode
+from infrahub_sdk.schema import AttributeSchemaAPI, NodeSchemaAPI, RelationshipSchemaAPI
 
 from generators.backfill_structured_config import (
     INTERFACE_SECTIONS,
@@ -40,6 +42,7 @@ from generators.backfill_structured_config_query import (
 )
 from solution_arista_avd.protocols import (
     CoreAccountGroup,
+    DcimInterface,
     IpamIPAddress,
     IpamPrefix,
     RoutingBGPNeighbor,
@@ -361,6 +364,63 @@ class TestExtractOptional:
 
 
 class TestBackfillIp:
+    @pytest.mark.parametrize("assigned_id", ["iface-1", "iface-2"])
+    async def test_primary_ip_assignment_is_checked_without_legacy_inverse(self, assigned_id: str) -> None:
+        gen = _make_generator()
+        existing_ip = SimpleNamespace(id="ip-1", interface=None)
+        assigned = SimpleNamespace(id=assigned_id, name=SimpleNamespace(value="Ethernet2"))
+        gen.client.filters = AsyncMock(side_effect=[[existing_ip], [assigned]])
+        gen._interface_from_query = AsyncMock()
+        iface = _make_interface(iface_id="iface-1")
+        if assigned_id == "iface-1":
+            await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1")
+        else:
+            with pytest.raises(ValueError, match="already assigned to Ethernet2"):
+                await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1")
+        gen._interface_from_query.assert_not_awaited()
+        gen.client.create.assert_not_called()
+        gen.client.filters.assert_any_await(kind=DcimInterface, ip_address__ids=["ip-1"], include=["ip_address"])
+
+    async def test_primary_and_legacy_assignments_cannot_point_to_different_ports(self) -> None:
+        gen = _make_generator()
+        legacy = SimpleNamespace(id="legacy")
+        ip = SimpleNamespace(id="ip-1", interface=SimpleNamespace(peer=legacy))
+        gen._primary_ip_interfaces = {"ip-1": [SimpleNamespace(id="primary")]}
+        with pytest.raises(ValueError, match=r"assigned to multiple interfaces.*legacy.*primary"):
+            await gen._get_existing_ip_interface(ip)
+
+    async def test_grouped_ip_lookup_is_current_and_does_not_write_unchanged_primary_ips(self) -> None:
+        gen = _make_generator()
+        gen._interface_from_query = AsyncMock()
+        addresses = {"10.0.0.1/31", "10.0.0.3/31"}
+
+        def ip(identifier: str, address: str) -> SimpleNamespace:
+            return SimpleNamespace(id=identifier, address=SimpleNamespace(value=address), interface=None)
+
+        existing = [ip("ip-1", "10.0.0.1/31"), ip("ip-2", "10.0.0.3/31")]
+        interfaces = [
+            SimpleNamespace(id=f"iface-{number}", ip_address=SimpleNamespace(id=node.id))
+            for number, node in enumerate(existing, 1)
+        ]
+        gen.client.filters = AsyncMock(side_effect=[existing, interfaces, [], []])
+        await gen._prepare_ip_lookup(addresses)
+        await gen._backfill_ip(_make_interface(iface_id="iface-1"), "10.0.0.1/31", "leaf")
+        await gen._backfill_ip(_make_interface(iface_id="iface-2"), "10.0.0.3/31", "leaf")
+        assert gen.client.filters.await_count == 2
+        gen._interface_from_query.assert_not_awaited()
+        gen.client.create.assert_not_called()
+
+        # A second calculation must read current graph state, not reuse peers
+        # from the previous calculation after the intent or assignments change.
+        await gen._prepare_ip_lookup({"10.0.0.5/31"})
+        assert not gen._existing_ips and not gen._primary_ip_interfaces
+        gen.client.filters.assert_any_await(
+            kind=IpamIPAddress,
+            address__values=["10.0.0.5/31"],
+            ip_namespace__name__value="default",
+            include=["interface"],
+        )
+
     async def test_backfill_creates_prefix_ip_and_assigns(self) -> None:
         """Test that _backfill_ip creates prefix, IP, and assigns to interface."""
         gen = _make_generator()
@@ -369,7 +429,7 @@ class TestBackfillIp:
         mock_interface = _make_saveable_mock()
 
         gen.client.create = AsyncMock(side_effect=[mock_prefix, mock_ip])
-        gen.client.get = AsyncMock(return_value=mock_interface)
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
 
         iface = _make_interface(name="Ethernet1", ip_node=None)
         await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1")
@@ -393,9 +453,9 @@ class TestBackfillIp:
         mock_ip.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
         # Verify interface assignment
-        gen.client.get.assert_awaited_once()
+        gen._interface_from_query.assert_awaited_once()
         assert mock_interface.ip_address == mock_ip
-        mock_interface.save.assert_awaited_once_with(allow_upsert=True)
+        mock_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     async def test_backfill_skips_invalid_ip(self) -> None:
         """Test that invalid IP format is skipped without error."""
@@ -415,7 +475,7 @@ class TestBackfillIp:
         mock_interface = _make_saveable_mock()
 
         gen.client.create = AsyncMock(side_effect=[mock_prefix, mock_ip])
-        gen.client.get = AsyncMock(return_value=mock_interface)
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
 
         iface = _make_interface(name="Loopback0", ip_node=None)
         await gen._backfill_ip(iface, "10.255.0.1/32", "leaf-1")
@@ -443,7 +503,7 @@ class TestBackfillIp:
         existing_ip.interface = SimpleNamespace(
             peer=SimpleNamespace(id="iface-2", name=SimpleNamespace(value="Ethernet2"))
         )
-        gen.client.filters = AsyncMock(return_value=[existing_ip])
+        gen.client.filters = AsyncMock(side_effect=[[existing_ip], []])
         iface = _make_interface(iface_id="iface-1", name="Ethernet1", ip_node=None)
 
         with pytest.raises(ValueError, match=r"already assigned to Ethernet2 \(iface-2\).*Ethernet1 \(iface-1\)"):
@@ -458,7 +518,7 @@ class TestBackfillIp:
         existing_ip.interface = SimpleNamespace(
             peer=SimpleNamespace(id="iface-1", name=SimpleNamespace(value="Ethernet1"))
         )
-        gen.client.filters = AsyncMock(return_value=[existing_ip])
+        gen.client.filters = AsyncMock(side_effect=[[existing_ip], []])
         iface = _make_interface(iface_id="iface-1", name="Ethernet1", ip_node=None)
 
         await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1")
@@ -471,15 +531,15 @@ class TestBackfillIp:
         existing_ip = MagicMock()
         existing_ip.interface = None
         mock_interface = _make_saveable_mock()
-        gen.client.filters = AsyncMock(return_value=[existing_ip])
-        gen.client.get = AsyncMock(return_value=mock_interface)
+        gen.client.filters = AsyncMock(side_effect=[[existing_ip], []])
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
         iface = _make_interface(iface_id="iface-1", name="Ethernet1", ip_node=None)
 
         await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1")
 
         gen.client.create.assert_not_called()
         assert mock_interface.ip_address == existing_ip
-        mock_interface.save.assert_awaited_once_with(allow_upsert=True)
+        mock_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     async def test_backfill_assigns_existing_ip_with_uninitialized_interface_relationship(self) -> None:
         gen = _make_generator()
@@ -487,8 +547,8 @@ class TestBackfillIp:
         interface_rel = _UninitializedRelatedNode()
         existing_ip.interface = interface_rel
         mock_interface = _make_saveable_mock()
-        gen.client.filters = AsyncMock(return_value=[existing_ip])
-        gen.client.get = AsyncMock(return_value=mock_interface)
+        gen.client.filters = AsyncMock(side_effect=[[existing_ip], []])
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
         iface = _make_interface(iface_id="iface-1", name="Ethernet1", ip_node=None)
 
         await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1")
@@ -496,7 +556,7 @@ class TestBackfillIp:
         gen.client.create.assert_not_called()
         interface_rel.fetch.assert_not_called()
         assert mock_interface.ip_address == existing_ip
-        mock_interface.save.assert_awaited_once_with(allow_upsert=True)
+        mock_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
 
 class TestUpdateMtu:
@@ -505,27 +565,69 @@ class TestUpdateMtu:
         gen = _make_generator()
         mock_interface = _make_saveable_mock()
         mock_interface.mtu = MagicMock()
-        gen.client.get = AsyncMock(return_value=mock_interface)
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
 
         iface = _make_interface(mtu=1500)
         await gen._update_mtu(iface, 9214, "leaf-1")
 
-        gen.client.get.assert_awaited_once()
+        gen._interface_from_query.assert_awaited_once()
         assert mock_interface.mtu.value == 9214
-        mock_interface.save.assert_awaited_once_with(allow_upsert=True)
+        mock_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     async def test_upserts_mtu_when_same(self) -> None:
         """Test that MTU is always saved even when current equals target."""
         gen = _make_generator()
         mock_interface = _make_saveable_mock()
         mock_interface.mtu = MagicMock(value=9214)
-        gen.client.get = AsyncMock(return_value=mock_interface)
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
 
         iface = _make_interface(mtu=9214)
         await gen._update_mtu(iface, 9214, "leaf-1")
 
-        gen.client.get.assert_awaited_once()
-        mock_interface.save.assert_awaited_once_with(allow_upsert=True)
+        gen._interface_from_query.assert_awaited_once()
+        mock_interface.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+
+
+async def test_hydrated_mtu_write_preserves_ip_from_earlier_write_and_unqueried_relationships(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gen = _make_generator()
+    gen.branch = "isolated-scenario"
+    gen.client.request_context = None
+    gen.client.schema.get = AsyncMock(
+        return_value=NodeSchemaAPI(
+            namespace="Interface",
+            name="Physical",
+            attributes=[
+                AttributeSchemaAPI(name="name", kind="Text"),
+                AttributeSchemaAPI(name="role", kind="Text", optional=True),
+                AttributeSchemaAPI(name="mtu", kind="Number", optional=True),
+            ],
+            relationships=[
+                RelationshipSchemaAPI(name="device", peer="DcimDevice", cardinality="one", optional=False),
+                RelationshipSchemaAPI(name="connector", peer="NetworkLink", cardinality="one", optional=True),
+                RelationshipSchemaAPI(name="ip_address", peer="IpamIPAddress", cardinality="one", optional=True),
+            ],
+        )
+    )
+    save = AsyncMock()
+    monkeypatch.setattr(InfrahubNode, "save", save)
+    queried = _make_interface(mtu=1500)
+    interface = await gen._interface_from_query(queried)
+    interface.ip_address = "ip-from-earlier-write"
+
+    await gen._update_mtu(queried, 9214, "leaf-1", avd_source="avd-group")
+
+    assert await gen._interface_from_query(queried) is interface
+    assert interface.mtu.value == 9214
+    assert interface.mtu.source.id == "avd-group"
+    payload = interface._generate_input_data()["data"]["data"]
+    assert payload["ip_address"] == {"id": "ip-from-earlier-write"}
+    assert "device" not in payload
+    assert "connector" not in payload
+    save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+    gen.client.schema.get.assert_awaited_once_with(kind="InterfacePhysical", branch=gen.branch, timeout=None)
+    gen.client.get.assert_not_awaited()
 
 
 # --- BGP backfill ---
@@ -1040,10 +1142,10 @@ class TestGenerate:
         mock_avd_group = MagicMock()
         mock_avd_group.id = "avd-group-id"
         mock_interface = _make_saveable_mock()
-        mock_interface_mtu = _make_saveable_mock()
 
         gen.client.create = AsyncMock(side_effect=[mock_prefix, mock_ip])
-        gen.client.get = AsyncMock(side_effect=[mock_sc_file, mock_avd_group, mock_interface, mock_interface_mtu])
+        gen.client.get = AsyncMock(side_effect=[mock_sc_file, mock_avd_group])
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
 
         interfaces = [
             {
@@ -1081,7 +1183,8 @@ class TestGenerate:
         loopback1 = _make_saveable_mock()
 
         gen.client.create = AsyncMock()
-        gen.client.get = AsyncMock(side_effect=[mock_sc_file, mock_avd_group, loopback0, loopback1])
+        gen.client.get = AsyncMock(side_effect=[mock_sc_file, mock_avd_group])
+        gen._interface_from_query = AsyncMock(side_effect=[loopback0, loopback1])
 
         interfaces = [
             {
@@ -1111,8 +1214,8 @@ class TestGenerate:
         gen.client.create.assert_not_called()
         assert loopback0.mtu.value == 9214
         assert loopback1.mtu.value == 9214
-        loopback0.save.assert_awaited_once_with(allow_upsert=True)
-        loopback1.save.assert_awaited_once_with(allow_upsert=True)
+        loopback0.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
+        loopback1.save.assert_awaited_once_with(allow_upsert=True, update_group_context=False)
 
     async def test_upserts_interface_with_existing_ip(self) -> None:
         """Test that interfaces with existing IPs are still upserted."""
@@ -1128,7 +1231,8 @@ class TestGenerate:
         mock_avd_group = MagicMock()
         mock_avd_group.id = "avd-group-id"
         mock_interface = _make_saveable_mock()
-        gen.client.get = AsyncMock(side_effect=[mock_sc_file, mock_avd_group, mock_interface])
+        gen.client.get = AsyncMock(side_effect=[mock_sc_file, mock_avd_group])
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
 
         interfaces = [
             {
@@ -1301,7 +1405,7 @@ class TestSourceAttributionIp:
         mock_interface = _make_saveable_mock()
 
         gen.client.create = AsyncMock(side_effect=[mock_prefix, mock_ip])
-        gen.client.get = AsyncMock(return_value=mock_interface)
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
 
         iface = _make_interface(name="Ethernet1", ip_node=None)
         await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1", avd_source="avd-123")
@@ -1318,7 +1422,7 @@ class TestSourceAttributionIp:
         mock_interface = _make_saveable_mock()
 
         gen.client.create = AsyncMock(side_effect=[mock_prefix, mock_ip])
-        gen.client.get = AsyncMock(return_value=mock_interface)
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
 
         iface = _make_interface(name="Ethernet1", ip_node=None)
         await gen._backfill_ip(iface, "10.0.0.1/31", "leaf-1", avd_source=None)
@@ -1334,7 +1438,7 @@ class TestSourceAttributionMtu:
         gen = _make_generator()
         mock_interface = _make_saveable_mock()
         mock_interface.mtu = MagicMock()
-        gen.client.get = AsyncMock(return_value=mock_interface)
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
 
         iface = _make_interface(mtu=1500)
         await gen._update_mtu(iface, 9214, "leaf-1", avd_source="avd-123")
@@ -1456,10 +1560,9 @@ class TestSourceAttributionGracefulDegradation:
 
         gen.client.create = AsyncMock(side_effect=[mock_prefix, mock_ip])
 
-        # First get call is for AvdStructuredConfigFile, then CoreAccountGroup (not found), then interface
-        gen.client.get = AsyncMock(
-            side_effect=[mock_sc_file, NodeNotFoundError(identifier={"name": ["AVD"]}), mock_interface]
-        )
+        # Only the file and source group need separate reads.
+        gen.client.get = AsyncMock(side_effect=[mock_sc_file, NodeNotFoundError(identifier={"name": ["AVD"]})])
+        gen._interface_from_query = AsyncMock(return_value=mock_interface)
 
         interfaces = [
             {
@@ -1509,3 +1612,20 @@ class TestConstants:
         assert "ip_routing" in UNMODELED_SECTIONS
         assert "spanning_tree" in UNMODELED_SECTIONS
         assert "ntp" in UNMODELED_SECTIONS
+
+
+async def test_backfill_mtu_two_passes_do_not_claim_topology_interface() -> None:
+    gen = _make_generator()
+    interface = _make_saveable_mock()
+    interface.id = "rack-owned-port"
+    interface.mtu.value = 1500
+    gen._interface_from_query = AsyncMock(return_value=interface)
+    first = _make_interface(mtu=1500)
+    await gen._update_mtu(first, 9214, "leaf-1")
+    second = _make_interface(mtu=9214)
+    await gen._update_mtu(second, 9214, "leaf-1")
+    assert interface.save.await_count == 2
+    assert all(
+        call.kwargs == {"allow_upsert": True, "update_group_context": False} for call in interface.save.await_args_list
+    )
+    assert interface.id == "rack-owned-port"

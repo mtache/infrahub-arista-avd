@@ -1,0 +1,26 @@
+query DeviceDesignParityQuery($offset: Int = 0, $limit: Int = 200) {
+  NetworkFabric(offset: $offset, limit: $limit) {
+    count
+    edges { node { id underlay_routing_protocol { value } } }
+  }
+  NetworkPod(offset: $offset, limit: $limit) {
+    count
+    edges { node { id name { value } parent { node { __typename id } } } }
+  }
+  LocationRack(offset: $offset, limit: $limit) {
+    count
+    edges { node { id name { value } pod { node { id } } } }
+  }
+  NetworkPodDeviceDesign(offset: $offset, limit: $limit) {
+    count
+    edges { node { role { value } device_quantity { value } pod { node { id } } } }
+  }
+  NetworkRackDeviceDesign(offset: $offset, limit: $limit) {
+    count
+    edges { node { role { value } device_quantity { value } rack { node { id } } } }
+  }
+  DcimDevice(offset: $offset, limit: $limit) {
+    count
+    edges { node { id role { value } rack { node { id } } pod { node { id } } } }
+  }
+}
